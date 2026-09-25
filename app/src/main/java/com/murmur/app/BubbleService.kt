@@ -19,6 +19,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.Toast
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -54,6 +55,11 @@ class BubbleService : AccessibilityService() {
     private var params: WindowManager.LayoutParams? = null
     private var keyboardTop: Int? = null
 
+    /** Where the keyboard's keys started last time; used to show the bubble before it opens. */
+    private var lastImeTop: Int? = null
+
+    private val visible = mutableStateOf(false)
+
     /** The text field dictation will go into, captured when listening starts. */
     private var target: AccessibilityNodeInfo? = null
     private var lastFocused: AccessibilityNodeInfo? = null
@@ -83,16 +89,33 @@ class BubbleService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
-            event.source?.takeIf { it.isEditable }?.let { lastFocused = it }
+        val type = event.eventType
+        if (type == AccessibilityEvent.TYPE_VIEW_FOCUSED || type == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            val field = event.source?.takeIf { it.isEditable }
+            if (field != null) {
+                lastFocused = field
+                // Don't wait for the keyboard window: show at its last known position so
+                // the bubble arrives together with the keyboard.
+                lastImeTop?.let { if (!visible.value) show(it) }
+                main.removeCallbacks(confirmKeyboard)
+                main.postDelayed(confirmKeyboard, 800)
+                return
+            }
         }
         refresh()
     }
 
+    /** Hides a bubble shown early on a field tap if no keyboard actually appeared. */
+    private val confirmKeyboard = Runnable { refresh() }
+
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        main.removeCallbacks(confirmKeyboard)
         hide()
+        bubble?.let { runCatching { wm.removeView(it) } }
+        bubble = null
+        params = null
         owner.stop()
         scope.cancel()
         super.onDestroy()
@@ -108,7 +131,9 @@ class BubbleService : AccessibilityService() {
         if (ime != null) {
             // Remember the field now, while the app (not the bubble) is the active window.
             if (!busy) focusedEditable()?.let { lastFocused = it }
-            show(keyboardTop(ime))
+            val top = keyboardTop(ime)
+            lastImeTop = top
+            show(top)
         } else if (!busy) {
             hide()
         }
@@ -148,17 +173,30 @@ class BubbleService : AccessibilityService() {
     private var pendingTop: Int? = null
 
     private fun show(imeTop: Int) {
-        if (bubble != null && params != null) {
-            // Follow the keyboard only once it has settled, and ignore tiny changes.
-            val current = keyboardTop ?: imeTop
+        val lp = params ?: createView(imeTop)
+        if (!visible.value) {
             main.removeCallbacks(reanchor)
-            if (kotlin.math.abs(imeTop - current) > dp(6)) {
-                pendingTop = imeTop
-                main.postDelayed(reanchor, 250)
-            }
+            keyboardTop = imeTop
+            lp.y = anchorY(imeTop)
+            lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            bubble?.let { wm.updateViewLayout(it, lp) }
+            visible.value = true
             return
         }
-        keyboardTop = imeTop
+        // Follow the keyboard only once it has settled, and ignore tiny changes.
+        val current = keyboardTop ?: imeTop
+        main.removeCallbacks(reanchor)
+        if (kotlin.math.abs(imeTop - current) > dp(6)) {
+            pendingTop = imeTop
+            main.postDelayed(reanchor, 250)
+        }
+    }
+
+    /**
+     * The overlay is created once and then only shown or hidden: building a Compose view
+     * from scratch each time the keyboard opened is what made the bubble appear late.
+     */
+    private fun createView(imeTop: Int): WindowManager.LayoutParams {
         val lp = WindowManager.LayoutParams(
             windowWidth(Murmur.state.value.phase.isActive),
             dp(BUBBLE_HEIGHT_DP + 2 * BUBBLE_MARGIN_DP),
@@ -167,7 +205,8 @@ class BubbleService : AccessibilityService() {
             // LAYOUT_IN_SCREEN: measure y from the top of the screen, like the keyboard bounds.
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.END
@@ -179,6 +218,7 @@ class BubbleService : AccessibilityService() {
             setViewTreeSavedStateRegistryOwner(owner)
             setContent {
                 Bubble(
+                    visible = visible.value,
                     insertedTick = insertedTick.intValue,
                     onTap = ::onTap,
                     onCancel = { DictationService.instance?.cancel() },
@@ -189,6 +229,7 @@ class BubbleService : AccessibilityService() {
         wm.addView(view, lp)
         bubble = view
         params = lp
+        return lp
     }
 
     /** Fixed window sizes: the pill animates inside the window, so it never relayouts per frame. */
@@ -209,10 +250,13 @@ class BubbleService : AccessibilityService() {
 
     private fun hide() {
         main.removeCallbacks(reanchor)
-        bubble?.let { runCatching { wm.removeView(it) } }
-        bubble = null
-        params = null
+        if (!visible.value) return
+        visible.value = false
         keyboardTop = null
+        // Stay attached (invisible) for an instant next show, but let touches through.
+        val lp = params ?: return
+        lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        bubble?.let { wm.updateViewLayout(it, lp) }
     }
 
     private fun drag(dx: Float, dy: Float) {

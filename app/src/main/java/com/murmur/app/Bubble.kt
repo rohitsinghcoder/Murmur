@@ -1,9 +1,15 @@
 package com.murmur.app
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -39,6 +45,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -53,40 +60,64 @@ import kotlinx.coroutines.delay
 const val BUBBLE_HEIGHT_DP = 44
 const val PILL_WIDTH_DP = 264
 const val BUBBLE_MARGIN_DP = 8
-const val COLLAPSE_MS = 320L
+const val CONTENT_FADE_MS = 90
+
+/** Total close time; the service waits this long before shrinking the overlay window. */
+const val COLLAPSE_MS = 90L + 260L
 
 private val Ink = Color(0xF51B1B1E)
 private val Edge = Color(0x29FFFFFF)
 private val Soft = Color(0xB3FFFFFF)
 
 /**
- * The floating control. A small mic circle when idle; while listening it widens into a pill
- * with a live waveform and transcript, a cancel button and a stop button.
+ * The floating control. A small mark when idle; while listening it widens into a pill with a
+ * live waveform and transcript, a cancel button and a stop button.
  *
  * The overlay window has a fixed size for each mode; only this composable animates, which
  * keeps the growth smooth (resizing a window every frame makes it jitter).
+ *
+ * Closing is staged: the pill's contents fade out, then it shrinks, then the mark fades in.
  */
 @Composable
 fun Bubble(
+    visible: Boolean,
     insertedTick: Int,
     onTap: () -> Unit,
     onCancel: () -> Unit,
     onDrag: (Float, Float) -> Unit,
 ) {
     val state by Murmur.state.collectAsState()
+    val active = state.phase.isActive
+
+    // Keep showing the last words and waveform while the pill closes, instead of the
+    // "Listening…" placeholder the reset state would give.
+    var pill by remember { mutableStateOf(state) }
+    if (active) pill = state
+
     var showDone by remember { mutableStateOf(false) }
     LaunchedEffect(insertedTick) {
         if (insertedTick > 0) {
             showDone = true
-            delay(900)
+            delay(1000)
             showDone = false
         }
     }
-    val active = state.phase.isActive
+
     val width by animateDpAsState(
         if (active) PILL_WIDTH_DP.dp else BUBBLE_HEIGHT_DP.dp,
-        animationSpec = tween(COLLAPSE_MS.toInt(), easing = FastOutSlowInEasing),
+        animationSpec = if (active) tween(300, easing = FastOutSlowInEasing)
+        else tween(260, delayMillis = CONTENT_FADE_MS, easing = FastOutSlowInEasing),
         label = "width",
+    )
+    val pillAlpha by animateFloatAsState(
+        if (active) 1f else 0f,
+        animationSpec = if (active) tween(180, delayMillis = 140) else tween(CONTENT_FADE_MS),
+        label = "pill",
+    )
+    val markAlpha by animateFloatAsState(
+        if (active) 0f else 1f,
+        animationSpec = if (active) tween(90) else tween(160, delayMillis = CONTENT_FADE_MS + 200),
+        label = "mark",
     )
     val shape = RoundedCornerShape(BUBBLE_HEIGHT_DP.dp / 2)
 
@@ -94,55 +125,60 @@ fun Bubble(
         Modifier.fillMaxSize().padding(BUBBLE_MARGIN_DP.dp),
         contentAlignment = Alignment.CenterEnd,
     ) {
-        Box(
-            Modifier
-                .width(width)
-                .height(BUBBLE_HEIGHT_DP.dp)
-                .shadow(6.dp, shape)
-                .clip(shape)
-                .background(Ink)
-                .border(1.dp, Edge, shape)
-                .pointerInput(Unit) {
-                    detectDragGestures { change, amount ->
-                        change.consume()
-                        onDrag(amount.x, amount.y)
+        AnimatedVisibility(
+            visible,
+            enter = fadeIn(tween(140)) + scaleIn(tween(180), initialScale = 0.8f),
+            exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.9f),
+        ) {
+            Box(
+                Modifier
+                    .width(width)
+                    .height(BUBBLE_HEIGHT_DP.dp)
+                    .shadow(6.dp, shape)
+                    .clip(shape)
+                    .background(Ink)
+                    .border(1.dp, Edge, shape)
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, amount ->
+                            change.consume()
+                            onDrag(amount.x, amount.y)
+                        }
+                    }
+                    .clickable(onClick = onTap),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                if (pillAlpha > 0f) {
+                    // Laid out at full width and revealed by the growing clip, so nothing squashes.
+                    Box(
+                        Modifier.fillMaxHeight().wrapContentWidth(Alignment.End, unbounded = true)
+                            .requiredWidth(PILL_WIDTH_DP.dp).alpha(pillAlpha),
+                    ) {
+                        ListeningPill(pill, onCancel = onCancel, onStop = onTap)
                     }
                 }
-                .clickable(onClick = onTap),
-            contentAlignment = Alignment.CenterEnd,
-        ) {
-            Crossfade(
-                targetState = when {
-                    active -> "active"
-                    showDone -> "done"
-                    else -> "idle"
-                },
-                animationSpec = tween(180),
-                label = "bubble",
-            ) { mode ->
-                when (mode) {
-                    // Laid out at full width and revealed by the growing clip, so nothing squashes.
-                    "active" -> Box(
-                        Modifier.fillMaxHeight().wrapContentWidth(Alignment.End, unbounded = true)
-                            .requiredWidth(PILL_WIDTH_DP.dp),
+                if (markAlpha > 0f) {
+                    Box(
+                        Modifier.size(BUBBLE_HEIGHT_DP.dp).alpha(markAlpha),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        ListeningPill(state, onCancel = onCancel, onStop = onTap)
-                    }
-                    "done" -> Box(Modifier.size(BUBBLE_HEIGHT_DP.dp), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Rounded.Check, "Inserted", tint = Color.White, modifier = Modifier.size(22.dp))
-                    }
-                    else -> Box(Modifier.size(BUBBLE_HEIGHT_DP.dp), contentAlignment = Alignment.Center) {
-                        if (state.phase == Phase.Loading) {
-                            CircularProgressIndicator(
-                                color = Color.White,
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        } else {
-                            MurmurMark(
-                                color = if (state.phase == Phase.Off) Soft.copy(alpha = 0.4f) else Color.White,
-                                modifier = Modifier.size(20.dp),
-                            )
+                        Crossfade(showDone, animationSpec = tween(180), label = "mark") { done ->
+                            Box(Modifier.size(BUBBLE_HEIGHT_DP.dp), contentAlignment = Alignment.Center) {
+                                when {
+                                    done -> Icon(
+                                        Icons.Rounded.Check, "Inserted",
+                                        tint = Color.White, modifier = Modifier.size(22.dp),
+                                    )
+                                    state.phase == Phase.Loading -> CircularProgressIndicator(
+                                        color = Color.White,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    else -> MurmurMark(
+                                        color = if (state.phase == Phase.Off) Soft.copy(alpha = 0.4f) else Color.White,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                }
+                            }
                         }
                     }
                 }

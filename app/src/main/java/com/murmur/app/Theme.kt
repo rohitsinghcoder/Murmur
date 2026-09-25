@@ -33,6 +33,15 @@ object Prefs {
 
     fun setTheme(ctx: Context, mode: ThemeMode) =
         prefs(ctx).edit().putString("theme", mode.name).apply()
+
+    /** Bubble distance from the right edge, in px, once the user has dragged it. */
+    fun bubbleX(ctx: Context): Int? = prefs(ctx).getInt("bubble_x", -1).takeIf { it >= 0 }
+
+    /** Bubble window top, in px above the top of the keyboard. */
+    fun bubbleLift(ctx: Context): Int? = prefs(ctx).getInt("bubble_lift", -1).takeIf { it >= 0 }
+
+    fun setBubblePosition(ctx: Context, x: Int, lift: Int) =
+        prefs(ctx).edit().putInt("bubble_x", x.coerceAtLeast(0)).putInt("bubble_lift", lift.coerceAtLeast(0)).apply()
 }
 
 @Composable

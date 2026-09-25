@@ -187,13 +187,14 @@ class DictationService : Service() {
         Murmur.update { it.copy(phase = Phase.Ready, partial = "", levels = emptyList(), error = message) }
     }
 
-    /** Loudness of a chunk mapped to 0..1 over a -60..0 dB range. */
+    /** Loudness of a chunk mapped to 0..1: room noise stays near 0, normal speech fills it. */
     private fun level(chunk: FloatArray): Float {
         var sum = 0.0
         for (s in chunk) sum += s * s
         val rms = sqrt(sum / chunk.size)
         val db = 20 * log10(rms + 1e-6)
-        return ((db + 60) / 60).toFloat().coerceIn(0f, 1f)
+        val x = ((db + 50) / 40).toFloat().coerceIn(0f, 1f)
+        return x * x
     }
 
     private fun notification(): Notification {

@@ -6,6 +6,8 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.Region
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -50,7 +52,6 @@ class BubbleService : AccessibilityService() {
     private var bubble: ComposeView? = null
     private var params: WindowManager.LayoutParams? = null
     private var keyboardTop: Int? = null
-    private var movedByUser = false
 
     /** The text field dictation will go into, captured when listening starts. */
     private var target: AccessibilityNodeInfo? = null
@@ -106,12 +107,25 @@ class BubbleService : AccessibilityService() {
         if (ime != null) {
             // Remember the field now, while the app (not the bubble) is the active window.
             if (!busy) focusedEditable()?.let { lastFocused = it }
-            val r = Rect()
-            ime.getBoundsInScreen(r)
-            show(r.top)
+            show(keyboardTop(ime))
         } else if (!busy) {
             hide()
         }
+    }
+
+    /**
+     * Top of the visible keys. The keyboard's window often covers far more of the screen
+     * (Gboard reserves room for pop-ups), so use its touchable region where available.
+     */
+    private fun keyboardTop(ime: AccessibilityWindowInfo): Int {
+        if (Build.VERSION.SDK_INT >= 33) {
+            val region = Region()
+            ime.getRegionInScreen(region)
+            if (!region.isEmpty) return region.bounds.top
+        }
+        val r = Rect()
+        ime.getBoundsInScreen(r)
+        return r.top
     }
 
     private fun show(imeTop: Int) {
@@ -120,24 +134,25 @@ class BubbleService : AccessibilityService() {
         val existing = params
         if (bubble != null && existing != null) {
             // Re-anchor above the keyboard when it moves, unless the user dragged the bubble.
-            if (newTop && !movedByUser) {
+            if (newTop) {
                 existing.y = anchorY(imeTop)
                 wm.updateViewLayout(bubble, existing)
             }
             return
         }
-        movedByUser = false
         val lp = WindowManager.LayoutParams(
             windowWidth(Murmur.state.value.phase.isActive),
             dp(BUBBLE_HEIGHT_DP + 2 * BUBBLE_MARGIN_DP),
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             // Never take focus, so the keyboard and text field stay active underneath.
+            // LAYOUT_IN_SCREEN: measure y from the top of the screen, like the keyboard bounds.
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.END
-            x = dp(12)
+            x = Prefs.bubbleX(this@BubbleService) ?: dp(12)
             y = anchorY(imeTop)
         }
         val view = ComposeView(this).apply {
@@ -169,7 +184,9 @@ class BubbleService : AccessibilityService() {
         bubble?.let { wm.updateViewLayout(it, lp) }
     }
 
-    private fun anchorY(imeTop: Int) = imeTop - dp(BUBBLE_HEIGHT_DP + 2 * BUBBLE_MARGIN_DP + 4)
+    /** Just above the keys, or wherever the user last dragged it relative to the keyboard. */
+    private fun anchorY(imeTop: Int) =
+        imeTop - (Prefs.bubbleLift(this) ?: dp(BUBBLE_HEIGHT_DP + 2 * BUBBLE_MARGIN_DP + 6))
 
     private fun hide() {
         bubble?.let { runCatching { wm.removeView(it) } }
@@ -180,11 +197,12 @@ class BubbleService : AccessibilityService() {
 
     private fun drag(dx: Float, dy: Float) {
         val lp = params ?: return
-        movedByUser = true
         lp.x -= dx.roundToInt() // gravity END: x grows to the left
         lp.y += dy.roundToInt()
         bubble?.let { wm.updateViewLayout(it, lp) }
+        keyboardTop?.let { Prefs.setBubblePosition(this, lp.x, it - lp.y) }
     }
+
 
     private fun onTap() {
         val service = DictationService.instance

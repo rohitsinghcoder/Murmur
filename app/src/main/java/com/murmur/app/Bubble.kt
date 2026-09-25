@@ -42,27 +42,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
-const val BUBBLE_HEIGHT_DP = 52
-const val PILL_WIDTH_DP = 272
+const val BUBBLE_HEIGHT_DP = 44
+const val PILL_WIDTH_DP = 264
 const val BUBBLE_MARGIN_DP = 8
 const val COLLAPSE_MS = 320L
 
-private val Ink = Color(0xFF141417)
-private val Edge = Color(0x1FFFFFFF)
+private val Ink = Color(0xF51B1B1E)
+private val Edge = Color(0x29FFFFFF)
 private val Soft = Color(0xB3FFFFFF)
-private val Brand = Brush.linearGradient(listOf(Color(0xFF9D7BFF), Color(0xFF5B8DEF)))
-private val Muted = SolidColor(Color(0xFF2A2A30))
 
 /**
  * The floating control. A small mic circle when idle; while listening it widens into a pill
@@ -103,15 +98,9 @@ fun Bubble(
             Modifier
                 .width(width)
                 .height(BUBBLE_HEIGHT_DP.dp)
-                .shadow(10.dp, shape)
+                .shadow(6.dp, shape)
                 .clip(shape)
                 .background(Ink)
-                .background(
-                    // Fades out as the pill grows, leaving the dark pill behind.
-                    if (state.phase == Phase.Off) Muted else Brand,
-                    alpha = 1f - ((width - BUBBLE_HEIGHT_DP.dp) / (PILL_WIDTH_DP - BUBBLE_HEIGHT_DP).dp)
-                        .coerceIn(0f, 1f),
-                )
                 .border(1.dp, Edge, shape)
                 .pointerInput(Unit) {
                     detectDragGestures { change, amount ->
@@ -140,21 +129,19 @@ fun Bubble(
                         ListeningPill(state, onCancel = onCancel, onStop = onTap)
                     }
                     "done" -> Box(Modifier.size(BUBBLE_HEIGHT_DP.dp), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Rounded.Check, "Inserted", tint = Color.White, modifier = Modifier.size(26.dp))
+                        Icon(Icons.Rounded.Check, "Inserted", tint = Color.White, modifier = Modifier.size(22.dp))
                     }
                     else -> Box(Modifier.size(BUBBLE_HEIGHT_DP.dp), contentAlignment = Alignment.Center) {
                         if (state.phase == Phase.Loading) {
                             CircularProgressIndicator(
                                 color = Color.White,
-                                strokeWidth = 2.5.dp,
-                                modifier = Modifier.size(22.dp),
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp),
                             )
                         } else {
-                            Icon(
-                                painterResource(R.drawable.ic_mic),
-                                contentDescription = "Dictate",
-                                tint = if (state.phase == Phase.Off) Soft.copy(alpha = 0.5f) else Color.White,
-                                modifier = Modifier.size(24.dp),
+                            MurmurMark(
+                                color = if (state.phase == Phase.Off) Soft.copy(alpha = 0.4f) else Color.White,
+                                modifier = Modifier.size(20.dp),
                             )
                         }
                     }
@@ -171,30 +158,30 @@ private fun ListeningPill(state: DictationState, onCancel: () -> Unit, onStop: (
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(36.dp).clip(CircleShape).clickable(onClick = onCancel),
+            Modifier.size(32.dp).clip(CircleShape).clickable(onClick = onCancel),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Rounded.Close, "Cancel", tint = Soft, modifier = Modifier.size(18.dp))
+            Icon(Icons.Rounded.Close, "Cancel", tint = Soft, modifier = Modifier.size(16.dp))
         }
         Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
-            Waveform(state.levels, Modifier.fillMaxWidth().height(18.dp))
-            Spacer(Modifier.height(2.dp))
+            Waveform(state.levels, Modifier.fillMaxWidth().height(14.dp))
+            Spacer(Modifier.height(1.dp))
             Text(
                 state.partial.ifBlank { "Listening…" }.takeLast(60),
                 color = if (state.partial.isBlank()) Soft else Color.White,
-                fontSize = 12.sp,
+                fontSize = 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.StartEllipsis,
             )
         }
         Box(
-            Modifier.size(40.dp).clip(CircleShape).background(Brand).clickable(onClick = onStop),
+            Modifier.size(32.dp).clip(CircleShape).background(Color.White).clickable(onClick = onStop),
             contentAlignment = Alignment.Center,
         ) {
             if (state.phase == Phase.Finishing) {
-                CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                CircularProgressIndicator(color = Ink, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
             } else {
-                Box(Modifier.size(14.dp).clip(RoundedCornerShape(4.dp)).background(Color.White))
+                Box(Modifier.size(11.dp).clip(RoundedCornerShape(3.dp)).background(Ink))
             }
         }
     }
@@ -202,7 +189,7 @@ private fun ListeningPill(state: DictationState, onCancel: () -> Unit, onStop: (
 
 /** Scrolling level meter: one rounded bar per recent audio chunk, newest on the right. */
 @Composable
-fun Waveform(levels: List<Float>, modifier: Modifier, color: Color = Color.White, bars: Int = 36) {
+fun Waveform(levels: List<Float>, modifier: Modifier, color: Color = Color.White, bars: Int = 28) {
     Canvas(modifier) {
         val gap = size.width / bars
         val stroke = gap * 0.55f
@@ -217,6 +204,29 @@ fun Waveform(levels: List<Float>, modifier: Modifier, color: Color = Color.White
                 color.copy(alpha = alpha),
                 Offset(x, (size.height - h) / 2),
                 Offset(x, (size.height + h) / 2),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
+}
+
+/** Murmur's mark: five symmetric rounded bars, matching the app icon. */
+@Composable
+fun MurmurMark(color: Color, modifier: Modifier) {
+    Canvas(modifier) {
+        val heights = floatArrayOf(0.3f, 0.65f, 1f, 0.65f, 0.3f)
+        val gap = size.width / heights.size
+        val stroke = gap * 0.55f
+        // Round caps add half a stroke at each end; keep the tallest bar inside the box.
+        val maxHalf = (size.height - stroke) / 2
+        heights.forEachIndexed { i, h ->
+            val x = gap * i + gap / 2
+            val half = maxHalf * h
+            drawLine(
+                color,
+                Offset(x, size.height / 2 - half),
+                Offset(x, size.height / 2 + half),
                 strokeWidth = stroke,
                 cap = StrokeCap.Round,
             )

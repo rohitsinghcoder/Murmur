@@ -3,5 +3,5 @@
 set -e
 cd "$(dirname "$0")"
 gradle assembleDebug -q --console=plain
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+timeout 90 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.murmur.app/.MainActivity

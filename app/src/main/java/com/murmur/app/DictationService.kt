@@ -72,7 +72,10 @@ class DictationService : Service() {
             worker.execute {
                 val t0 = SystemClock.elapsedRealtime()
                 try {
-                    Engine.load(this)
+                    Transcriber(Engine.load(this)).run {
+                        accept(FloatArray(SAMPLE_RATE))
+                        finish()
+                    }
                     val ms = SystemClock.elapsedRealtime() - t0
                     Murmur.update { it.copy(phase = Phase.Ready, loadMs = ms) }
                 } catch (e: Throwable) {

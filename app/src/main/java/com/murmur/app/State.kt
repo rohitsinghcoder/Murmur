@@ -4,7 +4,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 
-enum class Phase { Off, Loading, Ready, Listening, Finishing }
+enum class Phase {
+    Off, Loading, Ready, Listening, Finishing;
+
+    /** A dictation is in progress (the bubble shows the wide pill). */
+    val isActive get() = this == Listening || this == Finishing
+}
 
 data class DictationState(
     val phase: Phase = Phase.Off,

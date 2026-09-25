@@ -1,28 +1,27 @@
 package com.murmur.app
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.togetherWith
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -43,7 +42,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
@@ -53,15 +54,22 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
 const val BUBBLE_HEIGHT_DP = 52
+const val PILL_WIDTH_DP = 272
+const val BUBBLE_MARGIN_DP = 8
+const val COLLAPSE_MS = 320L
 
 private val Ink = Color(0xFF141417)
 private val Edge = Color(0x1FFFFFFF)
-private val Accent = Color(0xFF8B7CF6)
 private val Soft = Color(0xB3FFFFFF)
+private val Brand = Brush.linearGradient(listOf(Color(0xFF9D7BFF), Color(0xFF5B8DEF)))
+private val Muted = SolidColor(Color(0xFF2A2A30))
 
 /**
  * The floating control. A small mic circle when idle; while listening it widens into a pill
  * with a live waveform and transcript, a cancel button and a stop button.
+ *
+ * The overlay window has a fixed size for each mode; only this composable animates, which
+ * keeps the growth smooth (resizing a window every frame makes it jitter).
  */
 @Composable
 fun Bubble(
@@ -79,44 +87,65 @@ fun Bubble(
             showDone = false
         }
     }
-    val active = state.phase == Phase.Listening || state.phase == Phase.Finishing
+    val active = state.phase.isActive
+    val width by animateDpAsState(
+        if (active) PILL_WIDTH_DP.dp else BUBBLE_HEIGHT_DP.dp,
+        animationSpec = tween(COLLAPSE_MS.toInt(), easing = FastOutSlowInEasing),
+        label = "width",
+    )
+    val shape = RoundedCornerShape(BUBBLE_HEIGHT_DP.dp / 2)
 
-    Box(Modifier.padding(8.dp)) {
+    Box(
+        Modifier.fillMaxSize().padding(BUBBLE_MARGIN_DP.dp),
+        contentAlignment = Alignment.CenterEnd,
+    ) {
         Box(
             Modifier
-                .shadow(10.dp, CircleShape)
-                .clip(RoundedCornerShape(BUBBLE_HEIGHT_DP.dp / 2))
+                .width(width)
+                .height(BUBBLE_HEIGHT_DP.dp)
+                .shadow(10.dp, shape)
+                .clip(shape)
                 .background(Ink)
-                .border(1.dp, Edge, RoundedCornerShape(BUBBLE_HEIGHT_DP.dp / 2))
+                .background(
+                    // Fades out as the pill grows, leaving the dark pill behind.
+                    if (state.phase == Phase.Off) Muted else Brand,
+                    alpha = 1f - ((width - BUBBLE_HEIGHT_DP.dp) / (PILL_WIDTH_DP - BUBBLE_HEIGHT_DP).dp)
+                        .coerceIn(0f, 1f),
+                )
+                .border(1.dp, Edge, shape)
                 .pointerInput(Unit) {
                     detectDragGestures { change, amount ->
                         change.consume()
                         onDrag(amount.x, amount.y)
                     }
                 }
-                .clickable(onClick = onTap)
-                .animateContentSize(spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow))
-                .height(BUBBLE_HEIGHT_DP.dp),
-            contentAlignment = Alignment.Center,
+                .clickable(onClick = onTap),
+            contentAlignment = Alignment.CenterEnd,
         ) {
-            AnimatedContent(
+            Crossfade(
                 targetState = when {
-                    showDone -> "done"
                     active -> "active"
+                    showDone -> "done"
                     else -> "idle"
                 },
-                transitionSpec = { (fadeIn() + scaleIn(initialScale = 0.9f)) togetherWith fadeOut() },
+                animationSpec = tween(180),
                 label = "bubble",
             ) { mode ->
                 when (mode) {
-                    "done" -> Box(Modifier.size(BUBBLE_HEIGHT_DP.dp), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Rounded.Check, "Inserted", tint = Accent, modifier = Modifier.size(26.dp))
+                    // Laid out at full width and revealed by the growing clip, so nothing squashes.
+                    "active" -> Box(
+                        Modifier.fillMaxHeight().wrapContentWidth(Alignment.End, unbounded = true)
+                            .requiredWidth(PILL_WIDTH_DP.dp),
+                    ) {
+                        ListeningPill(state, onCancel = onCancel, onStop = onTap)
                     }
-                    "active" -> ListeningPill(state, onCancel = onCancel, onStop = onTap)
+                    "done" -> Box(Modifier.size(BUBBLE_HEIGHT_DP.dp), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Rounded.Check, "Inserted", tint = Color.White, modifier = Modifier.size(26.dp))
+                    }
                     else -> Box(Modifier.size(BUBBLE_HEIGHT_DP.dp), contentAlignment = Alignment.Center) {
                         if (state.phase == Phase.Loading) {
                             CircularProgressIndicator(
-                                color = Accent,
+                                color = Color.White,
                                 strokeWidth = 2.5.dp,
                                 modifier = Modifier.size(22.dp),
                             )
@@ -124,7 +153,7 @@ fun Bubble(
                             Icon(
                                 painterResource(R.drawable.ic_mic),
                                 contentDescription = "Dictate",
-                                tint = if (state.phase == Phase.Ready) Color.White else Soft.copy(alpha = 0.45f),
+                                tint = if (state.phase == Phase.Off) Soft.copy(alpha = 0.5f) else Color.White,
                                 modifier = Modifier.size(24.dp),
                             )
                         }
@@ -138,7 +167,7 @@ fun Bubble(
 @Composable
 private fun ListeningPill(state: DictationState, onCancel: () -> Unit, onStop: () -> Unit) {
     Row(
-        Modifier.width(272.dp).padding(horizontal = 6.dp),
+        Modifier.fillMaxSize().padding(horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -159,7 +188,7 @@ private fun ListeningPill(state: DictationState, onCancel: () -> Unit, onStop: (
             )
         }
         Box(
-            Modifier.size(40.dp).clip(CircleShape).background(Accent).clickable(onClick = onStop),
+            Modifier.size(40.dp).clip(CircleShape).background(Brand).clickable(onClick = onStop),
             contentAlignment = Alignment.Center,
         ) {
             if (state.phase == Phase.Finishing) {

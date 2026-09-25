@@ -29,6 +29,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -63,7 +66,18 @@ class BubbleService : AccessibilityService() {
         wm = getSystemService(WindowManager::class.java)
         owner.start()
         // Keep the bubble up while dictation finishes, even if the keyboard closes.
-        scope.launch { Murmur.state.collect { refresh() } }
+        scope.launch {
+            Murmur.state.map { it.phase.isActive }.distinctUntilChanged().collect { active ->
+                if (active) {
+                    setExpanded(true)
+                } else {
+                    // Let the pill finish shrinking before the window gets small again.
+                    delay(COLLAPSE_MS)
+                    if (!Murmur.state.value.phase.isActive) setExpanded(false)
+                }
+                refresh()
+            }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -88,8 +102,10 @@ class BubbleService : AccessibilityService() {
         } catch (_: Exception) {
             null
         }
-        val busy = Murmur.state.value.phase.let { it == Phase.Listening || it == Phase.Finishing }
+        val busy = Murmur.state.value.phase.isActive
         if (ime != null) {
+            // Remember the field now, while the app (not the bubble) is the active window.
+            if (!busy) focusedEditable()?.let { lastFocused = it }
             val r = Rect()
             ime.getBoundsInScreen(r)
             show(r.top)
@@ -112,8 +128,8 @@ class BubbleService : AccessibilityService() {
         }
         movedByUser = false
         val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            windowWidth(Murmur.state.value.phase.isActive),
+            dp(BUBBLE_HEIGHT_DP + 2 * BUBBLE_MARGIN_DP),
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             // Never take focus, so the keyboard and text field stay active underneath.
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -141,7 +157,19 @@ class BubbleService : AccessibilityService() {
         params = lp
     }
 
-    private fun anchorY(imeTop: Int) = imeTop - dp(BUBBLE_HEIGHT_DP + 12)
+    /** Fixed window sizes: the pill animates inside the window, so it never relayouts per frame. */
+    private fun windowWidth(expanded: Boolean) =
+        dp((if (expanded) PILL_WIDTH_DP else BUBBLE_HEIGHT_DP) + 2 * BUBBLE_MARGIN_DP)
+
+    private fun setExpanded(expanded: Boolean) {
+        val lp = params ?: return
+        val width = windowWidth(expanded)
+        if (lp.width == width) return
+        lp.width = width
+        bubble?.let { wm.updateViewLayout(it, lp) }
+    }
+
+    private fun anchorY(imeTop: Int) = imeTop - dp(BUBBLE_HEIGHT_DP + 2 * BUBBLE_MARGIN_DP + 4)
 
     private fun hide() {
         bubble?.let { runCatching { wm.removeView(it) } }
@@ -165,7 +193,7 @@ class BubbleService : AccessibilityService() {
             Phase.Loading, Phase.Finishing -> Unit
             Phase.Ready -> {
                 if (service == null) return openApp("Open Murmur and tap Start to use the bubble")
-                target = focusedEditable()
+                target = focusedEditable() ?: lastFocused
                 service.listen { text -> insert(text) }
             }
             Phase.Listening -> service?.finish()
@@ -179,9 +207,21 @@ class BubbleService : AccessibilityService() {
         )
     }
 
-    private fun focusedEditable(): AccessibilityNodeInfo? =
-        rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable }
-            ?: lastFocused?.takeIf { it.refresh() && it.isEditable }
+    private fun focusedEditable(): AccessibilityNodeInfo? {
+        val appWindows = try {
+            windows.filter {
+                it.type == AccessibilityWindowInfo.TYPE_APPLICATION ||
+                    it.type == AccessibilityWindowInfo.TYPE_SYSTEM
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+        for (window in appWindows.sortedByDescending { it.isFocused }) {
+            val node = window.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (node != null && node.isEditable) return node
+        }
+        return lastFocused?.takeIf { it.refresh() && it.isEditable }
+    }
 
     /** Inserts [text] at the cursor of the field that was focused when dictation started. */
     private fun insert(text: String) {

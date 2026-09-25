@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_description">Shows the Murmur bubble above your keyboard and types what you say into the text field you are using. Speech is processed entirely on your phone; Murmur does not read or store other screen content.</string>
+</resources>

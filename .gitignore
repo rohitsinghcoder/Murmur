@@ -3,3 +3,6 @@ build/
 local.properties
 build.log
 app/libs/*.aar
+
+# Downloaded by scripts/fetch-deps.sh
+models/

@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.Executors
 
 data class Dictation(
     val id: Long,
@@ -28,6 +29,9 @@ object History {
     val items: StateFlow<List<Dictation>> = _items
 
     @Volatile private var loaded = false
+
+    /** Disk writes run here, in order, so saving never blocks the UI or the bubble. */
+    private val io = Executors.newSingleThreadExecutor()
 
     private fun file(ctx: Context) = File(ctx.filesDir, "history.jsonl")
 
@@ -60,11 +64,13 @@ object History {
         val now = System.currentTimeMillis()
         val entry = Dictation(now, text, now, audioMs, appPackage?.let { appLabel(ctx, it) })
         _items.update { listOf(entry) + it }
-        file(ctx).appendText(toJson(entry) + "\n")
+        val line = toJson(entry) + "\n"
+        io.execute { file(ctx).appendText(line) }
     }
 
     @Synchronized
     fun delete(ctx: Context, id: Long) {
+        load(ctx)
         _items.update { list -> list.filter { it.id != id } }
         rewrite(ctx)
     }
@@ -72,11 +78,12 @@ object History {
     @Synchronized
     fun clear(ctx: Context) {
         _items.value = emptyList()
-        file(ctx).delete()
+        io.execute { file(ctx).delete() }
     }
 
     private fun rewrite(ctx: Context) {
-        file(ctx).writeText(_items.value.reversed().joinToString("") { toJson(it) + "\n" })
+        val all = _items.value.reversed().joinToString("") { toJson(it) + "\n" }
+        io.execute { file(ctx).writeText(all) }
     }
 
     private fun toJson(d: Dictation) = JSONObject()

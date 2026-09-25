@@ -224,6 +224,7 @@ class BubbleService : AccessibilityService() {
                     onTap = ::onTap,
                     onCancel = { DictationService.instance?.cancel() },
                     onDrag = { dx, dy -> drag(dx, dy) },
+                    onDragEnd = ::savePosition,
                 )
             }
         }
@@ -273,6 +274,11 @@ class BubbleService : AccessibilityService() {
         lp.x -= dx.roundToInt() // gravity END: x grows to the left
         lp.y += dy.roundToInt()
         bubble?.let { wm.updateViewLayout(it, lp) }
+    }
+
+    /** Saved once per drag rather than on every move event. */
+    private fun savePosition() {
+        val lp = params ?: return
         Prefs.setBubbleX(this, lp.x)
         Prefs.setBubbleY(this, lp.y)
     }

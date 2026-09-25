@@ -16,6 +16,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.sqrt
@@ -31,6 +32,12 @@ class DictationService : Service() {
         private const val ACTION_STOP = "com.murmur.app.STOP"
         private const val CHANNEL = "murmur"
         private const val NOTIFICATION_ID = 1
+
+        /** Audio kept after the stop tap, for a word still being finished. */
+        private const val TAIL_MS = 200L
+
+        /** Marks the end of the recording in the audio queue. */
+        private val END = FloatArray(0)
 
         @Volatile
         var instance: DictationService? = null
@@ -105,7 +112,17 @@ class DictationService : Service() {
         recording = true
         cancelled = false
         Murmur.update { it.copy(phase = Phase.Listening, partial = "", levels = emptyList(), error = null) }
-        worker.execute { runSession(appPackage, onText) }
+        worker.execute {
+            try {
+                runSession(appPackage, onText)
+            } catch (e: Throwable) {
+                // Never leave the bubble stuck in the listening pill.
+                recording = false
+                Murmur.update {
+                    it.copy(phase = Phase.Ready, partial = "", levels = emptyList(), error = "Dictation failed: ${e.message}")
+                }
+            }
+        }
         return true
     }
 
@@ -144,24 +161,28 @@ class DictationService : Service() {
             return
         }
 
-        val buf = FloatArray(SAMPLE_RATE / 20) // 50 ms
-        val levels = ArrayDeque<Float>()
+        // The mic is read on its own thread and queued, so a slow decode step never makes the
+        // recorder drop audio, and everything said before the tap still gets transcribed.
+        val queue = LinkedBlockingQueue<FloatArray>()
+        val reader = Thread({ record(audio, queue) }, "murmur-mic")
+        reader.start()
         var samples = 0L
-        audio.startRecording()
-        try {
-            while (recording) {
-                val n = audio.read(buf, 0, buf.size, AudioRecord.READ_BLOCKING)
-                if (n <= 0) continue
-                val chunk = buf.copyOf(n)
-                samples += n
-                val text = transcriber.accept(chunk)
-                levels.addLast(level(chunk))
-                if (levels.size > 36) levels.removeFirst()
-                Murmur.update { it.copy(partial = text, levels = levels.toList()) }
+        val pending = ArrayList<FloatArray>()
+        while (true) {
+            pending.add(queue.take())
+            // Catch up in one step if audio queued up while the last chunk was decoding.
+            queue.drainTo(pending)
+            val ended = pending.removeAll { it === END }
+            if (!cancelled) {
+                val chunk = concat(pending)
+                if (chunk.isNotEmpty()) {
+                    samples += chunk.size
+                    val text = Cleanup.tidy(transcriber.accept(chunk))
+                    Murmur.update { it.copy(partial = text) }
+                }
             }
-        } finally {
-            audio.stop()
-            audio.release()
+            pending.clear()
+            if (ended) break
         }
 
         if (cancelled) {
@@ -171,7 +192,7 @@ class DictationService : Service() {
         }
         Murmur.update { it.copy(phase = Phase.Finishing) }
         val t0 = SystemClock.elapsedRealtime()
-        val text = transcriber.finish()
+        val text = Cleanup.tidy(transcriber.finish())
         val latency = SystemClock.elapsedRealtime() - t0
         // Insert first, then leave the active phase: the pill then collapses straight into
         // the check mark instead of flashing the idle icon in between.
@@ -191,6 +212,42 @@ class DictationService : Service() {
                 )
             }
         }
+    }
+
+    /** Records until the user stops, plus a short tail so a last word cut off by the tap is kept. */
+    private fun record(audio: AudioRecord, queue: LinkedBlockingQueue<FloatArray>) {
+        val buf = FloatArray(SAMPLE_RATE / 20) // 50 ms
+        val levels = ArrayDeque<Float>()
+        var stopAt = Long.MAX_VALUE
+        try {
+            audio.startRecording()
+            while (!cancelled && SystemClock.elapsedRealtime() < stopAt) {
+                if (!recording && stopAt == Long.MAX_VALUE) stopAt = SystemClock.elapsedRealtime() + TAIL_MS
+                val n = audio.read(buf, 0, buf.size, AudioRecord.READ_BLOCKING)
+                if (n < 0) break
+                if (n == 0) continue
+                val chunk = buf.copyOf(n)
+                queue.put(chunk)
+                levels.addLast(level(chunk))
+                if (levels.size > 36) levels.removeFirst()
+                Murmur.update { it.copy(levels = levels.toList()) }
+            }
+        } finally {
+            runCatching { audio.stop() }
+            audio.release()
+            queue.put(END)
+        }
+    }
+
+    private fun concat(chunks: List<FloatArray>): FloatArray {
+        if (chunks.size == 1) return chunks[0]
+        val out = FloatArray(chunks.sumOf { it.size })
+        var at = 0
+        for (c in chunks) {
+            c.copyInto(out, at)
+            at += c.size
+        }
+        return out
     }
 
     private fun fail(transcriber: Transcriber, message: String) {

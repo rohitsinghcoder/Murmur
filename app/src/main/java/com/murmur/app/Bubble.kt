@@ -85,6 +85,7 @@ fun Bubble(
     onTap: () -> Unit,
     onCancel: () -> Unit,
     onDrag: (Float, Float) -> Unit,
+    onDragEnd: () -> Unit,
 ) {
     val state by Murmur.state.collectAsState()
     val active = state.phase.isActive
@@ -139,7 +140,7 @@ fun Bubble(
                     .background(Ink)
                     .border(1.dp, Edge, shape)
                     .pointerInput(Unit) {
-                        detectDragGestures { change, amount ->
+                        detectDragGestures(onDragEnd = onDragEnd, onDragCancel = onDragEnd) { change, amount ->
                             change.consume()
                             onDrag(amount.x, amount.y)
                         }

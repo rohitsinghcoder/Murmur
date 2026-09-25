@@ -96,13 +96,16 @@ class DictationService : Service() {
         super.onDestroy()
     }
 
-    /** Starts listening; [onText] gets the final transcript on the main thread. */
-    fun listen(onText: (String) -> Unit): Boolean {
+    /**
+     * Starts listening; [onText] gets the final transcript on the main thread. The result is
+     * also saved to [History], tagged with [appPackage] (the app it is typed into).
+     */
+    fun listen(appPackage: String? = null, onText: (String) -> Unit): Boolean {
         if (Murmur.state.value.phase != Phase.Ready) return false
         recording = true
         cancelled = false
         Murmur.update { it.copy(phase = Phase.Listening, partial = "", levels = emptyList(), error = null) }
-        worker.execute { runSession(onText) }
+        worker.execute { runSession(appPackage, onText) }
         return true
     }
 
@@ -117,7 +120,7 @@ class DictationService : Service() {
         recording = false
     }
 
-    private fun runSession(onText: (String) -> Unit) {
+    private fun runSession(appPackage: String?, onText: (String) -> Unit) {
         val transcriber = Transcriber(Engine.load(this))
         val audio = try {
             val minBuf = AudioRecord.getMinBufferSize(
@@ -172,15 +175,19 @@ class DictationService : Service() {
         val latency = SystemClock.elapsedRealtime() - t0
         // Insert first, then leave the active phase: the pill then collapses straight into
         // the check mark instead of flashing the idle icon in between.
+        val audioMs = samples * 1000 / SAMPLE_RATE
         main.post {
-            if (text.isNotBlank()) onText(text)
+            if (text.isNotBlank()) {
+                onText(text)
+                History.add(this, text, audioMs, appPackage)
+            }
             Murmur.update {
                 it.copy(
                     phase = Phase.Ready,
                     partial = "",
                     levels = emptyList(),
                     lastLatencyMs = latency,
-                    lastAudioMs = samples * 1000 / SAMPLE_RATE,
+                    lastAudioMs = audioMs,
                 )
             }
         }

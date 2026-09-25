@@ -9,12 +9,17 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -37,11 +42,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.List
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Settings
@@ -55,6 +62,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,10 +87,10 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     // Bumped on resume so permission and settings state is re-read after visiting Settings.
@@ -90,6 +100,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         themeMode.value = Prefs.theme(this)
+        History.load(this)
         setContent {
             MurmurTheme(themeMode.value) {
                 MurmurApp(
@@ -123,7 +134,19 @@ private fun bubbleEnabled(ctx: Context): Boolean {
 private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) -> Unit) {
     val ctx = LocalContext.current
     val state by Murmur.state.collectAsState()
+    val history by History.items.collectAsState()
     var appearanceOpen by remember { mutableStateOf(false) }
+    var historyOpen by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
+
+    fun copy(d: Dictation) {
+        copyText(ctx, d.text)
+        scope.launch {
+            snackbar.currentSnackbarData?.dismiss()
+            snackbar.showSnackbar("Copied to clipboard", duration = SnackbarDuration.Short)
+        }
+    }
 
     val micGranted = remember(resumeTick) {
         ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -150,7 +173,9 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item(key = "header") { Header(onAppearance = { appearanceOpen = true }) }
+            item(key = "header") {
+                Header(onHistory = { historyOpen = true }, onAppearance = { appearanceOpen = true })
+            }
 
             item(key = "status") {
                 StatusCard(
@@ -213,10 +238,43 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
             item(key = "try-label") { SectionLabel("Try it") }
             item(key = "try") { TryCard(state) }
 
+            if (history.isNotEmpty()) {
+                item(key = "recent-label") {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f)) { SectionLabel("Recent") }
+                        TextButton(onClick = { historyOpen = true }, modifier = Modifier.padding(top = 12.dp)) {
+                            Text("See all")
+                        }
+                    }
+                }
+                items(history.take(3), key = { "recent-${it.id}" }) { d ->
+                    DictationRow(d, Modifier.animateItem(), onCopy = { copy(d) }, onDelete = null)
+                }
+            }
+
             if (SpeedTest.sample(ctx).exists()) {
                 item(key = "speed") { SpeedCard(enabled = state.phase == Phase.Ready) }
             }
         }
+    }
+
+    AnimatedVisibility(
+        historyOpen,
+        enter = slideInHorizontally { it } + fadeIn(),
+        exit = slideOutHorizontally { it } + fadeOut(),
+    ) {
+        BackHandler { historyOpen = false }
+        HistoryScreen(
+            items = history,
+            onBack = { historyOpen = false },
+            onCopy = { copy(it) },
+            onDelete = { History.delete(ctx, it.id) },
+            onClearAll = { History.clear(ctx) },
+        )
+    }
+
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+        SnackbarHost(snackbar, Modifier.padding(WindowInsets.navigationBars.asPaddingValues()))
     }
 
     if (appearanceOpen) {
@@ -225,7 +283,7 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
 }
 
 @Composable
-private fun Header(onAppearance: () -> Unit) {
+private fun Header(onHistory: () -> Unit, onAppearance: () -> Unit) {
     Row(Modifier.padding(start = 4.dp, bottom = 8.dp)) {
         Column(Modifier.weight(1f)) {
             Text("Murmur", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.SemiBold)
@@ -247,6 +305,11 @@ private fun Header(onAppearance: () -> Unit) {
                 shape = RoundedCornerShape(20.dp),
                 containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
             ) {
+                DropdownMenuItem(
+                    text = { Text("History") },
+                    leadingIcon = { Icon(Icons.AutoMirrored.Rounded.List, contentDescription = null) },
+                    onClick = { menuOpen = false; onHistory() },
+                )
                 DropdownMenuItem(
                     text = { Text("Appearance") },
                     leadingIcon = { Icon(Icons.Rounded.Settings, contentDescription = null) },

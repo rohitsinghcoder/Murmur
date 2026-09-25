@@ -276,7 +276,7 @@ class BubbleService : AccessibilityService() {
             Phase.Ready -> {
                 if (service == null) return openApp("Open Murmur and tap Start to use the bubble")
                 target = focusedEditable() ?: lastFocused
-                service.listen { text -> insert(text) }
+                service.listen(target?.packageName?.toString()) { text -> insert(text) }
             }
             Phase.Listening -> service?.finish()
         }

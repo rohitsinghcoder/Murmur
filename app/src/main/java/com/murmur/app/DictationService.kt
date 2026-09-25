@@ -170,16 +170,20 @@ class DictationService : Service() {
         val t0 = SystemClock.elapsedRealtime()
         val text = transcriber.finish()
         val latency = SystemClock.elapsedRealtime() - t0
-        Murmur.update {
-            it.copy(
-                phase = Phase.Ready,
-                partial = "",
-                levels = emptyList(),
-                lastLatencyMs = latency,
-                lastAudioMs = samples * 1000 / SAMPLE_RATE,
-            )
+        // Insert first, then leave the active phase: the pill then collapses straight into
+        // the check mark instead of flashing the idle icon in between.
+        main.post {
+            if (text.isNotBlank()) onText(text)
+            Murmur.update {
+                it.copy(
+                    phase = Phase.Ready,
+                    partial = "",
+                    levels = emptyList(),
+                    lastLatencyMs = latency,
+                    lastAudioMs = samples * 1000 / SAMPLE_RATE,
+                )
+            }
         }
-        if (text.isNotBlank()) main.post { onText(text) }
     }
 
     private fun fail(transcriber: Transcriber, message: String) {

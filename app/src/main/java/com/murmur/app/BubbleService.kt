@@ -7,6 +7,7 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.Region
+import android.graphics.RegionIterator
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -73,7 +74,7 @@ class BubbleService : AccessibilityService() {
                     setExpanded(true)
                 } else {
                     // Let the pill finish shrinking before the window gets small again.
-                    delay(COLLAPSE_MS)
+                    delay(COLLAPSE_MS + 80)
                     if (!Murmur.state.value.phase.isActive) setExpanded(false)
                 }
                 refresh()
@@ -121,25 +122,43 @@ class BubbleService : AccessibilityService() {
         if (Build.VERSION.SDK_INT >= 33) {
             val region = Region()
             ime.getRegionInScreen(region)
-            if (!region.isEmpty) return region.bounds.top
+            // Only full-width parts count: key-press pop-ups are narrow and come and go
+            // while typing, and following them made the bubble shake.
+            val minWidth = resources.displayMetrics.widthPixels * 0.9f
+            var top = Int.MAX_VALUE
+            val rect = Rect()
+            val rects = RegionIterator(region)
+            while (rects.next(rect)) {
+                if (rect.width() >= minWidth) top = minOf(top, rect.top)
+            }
+            if (top != Int.MAX_VALUE) return top
         }
         val r = Rect()
         ime.getBoundsInScreen(r)
         return r.top
     }
 
+    private val reanchor = Runnable {
+        val lp = params ?: return@Runnable
+        val top = pendingTop ?: return@Runnable
+        keyboardTop = top
+        lp.y = anchorY(top)
+        bubble?.let { wm.updateViewLayout(it, lp) }
+    }
+    private var pendingTop: Int? = null
+
     private fun show(imeTop: Int) {
-        val newTop = imeTop != keyboardTop
-        keyboardTop = imeTop
-        val existing = params
-        if (bubble != null && existing != null) {
-            // Re-anchor above the keyboard when it moves, unless the user dragged the bubble.
-            if (newTop) {
-                existing.y = anchorY(imeTop)
-                wm.updateViewLayout(bubble, existing)
+        if (bubble != null && params != null) {
+            // Follow the keyboard only once it has settled, and ignore tiny changes.
+            val current = keyboardTop ?: imeTop
+            main.removeCallbacks(reanchor)
+            if (kotlin.math.abs(imeTop - current) > dp(6)) {
+                pendingTop = imeTop
+                main.postDelayed(reanchor, 250)
             }
             return
         }
+        keyboardTop = imeTop
         val lp = WindowManager.LayoutParams(
             windowWidth(Murmur.state.value.phase.isActive),
             dp(BUBBLE_HEIGHT_DP + 2 * BUBBLE_MARGIN_DP),
@@ -189,6 +208,7 @@ class BubbleService : AccessibilityService() {
         imeTop - (Prefs.bubbleLift(this) ?: dp(BUBBLE_HEIGHT_DP + 2 * BUBBLE_MARGIN_DP + 6))
 
     private fun hide() {
+        main.removeCallbacks(reanchor)
         bubble?.let { runCatching { wm.removeView(it) } }
         bubble = null
         params = null

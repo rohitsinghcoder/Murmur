@@ -37,11 +37,17 @@ object Prefs {
     /** Bubble distance from the right edge, in px, once the user has dragged it. */
     fun bubbleX(ctx: Context): Int? = prefs(ctx).getInt("bubble_x", -1).takeIf { it >= 0 }
 
-    /** Bubble window top, in px above the top of the keyboard. */
+    /** Bubble position before it was stored as a screen position: px above the keyboard. */
     fun bubbleLift(ctx: Context): Int? = prefs(ctx).getInt("bubble_lift", -1).takeIf { it >= 0 }
 
-    fun setBubblePosition(ctx: Context, x: Int, lift: Int) =
-        prefs(ctx).edit().putInt("bubble_x", x.coerceAtLeast(0)).putInt("bubble_lift", lift.coerceAtLeast(0)).apply()
+    /** Bubble window top on screen, in px, once the user has dragged it. */
+    fun bubbleY(ctx: Context): Int? = prefs(ctx).getInt("bubble_y", -1).takeIf { it >= 0 }
+
+    fun setBubbleX(ctx: Context, x: Int) =
+        prefs(ctx).edit().putInt("bubble_x", x.coerceAtLeast(0)).apply()
+
+    fun setBubbleY(ctx: Context, y: Int) =
+        prefs(ctx).edit().putInt("bubble_y", y.coerceAtLeast(0)).remove("bubble_lift").apply()
 }
 
 @Composable

@@ -53,10 +53,10 @@ class BubbleService : AccessibilityService() {
 
     private var bubble: ComposeView? = null
     private var params: WindowManager.LayoutParams? = null
-    private var keyboardTop: Int? = null
 
     /** Where the keyboard's keys started last time; used to show the bubble before it opens. */
     private var lastImeTop: Int? = null
+    private val imeTopByApp = HashMap<String?, Int>()
 
     private val visible = mutableStateOf(false)
 
@@ -96,7 +96,8 @@ class BubbleService : AccessibilityService() {
                 lastFocused = field
                 // Don't wait for the keyboard window: show at its last known position so
                 // the bubble arrives together with the keyboard.
-                lastImeTop?.let { if (!visible.value) show(it) }
+                val pkg = event.packageName?.toString()
+                (imeTopByApp[pkg] ?: lastImeTop)?.let { if (!visible.value) show(it) }
                 main.removeCallbacks(confirmKeyboard)
                 main.postDelayed(confirmKeyboard, 800)
                 return
@@ -133,6 +134,8 @@ class BubbleService : AccessibilityService() {
             if (!busy) focusedEditable()?.let { lastFocused = it }
             val top = keyboardTop(ime)
             lastImeTop = top
+            // Keyboards differ per app (toolbars, suggestion strips); remember each one.
+            lastFocused?.packageName?.toString()?.let { imeTopByApp[it] = top }
             show(top)
         } else if (!busy) {
             hide()
@@ -165,29 +168,27 @@ class BubbleService : AccessibilityService() {
 
     private val reanchor = Runnable {
         val lp = params ?: return@Runnable
-        val top = pendingTop ?: return@Runnable
-        keyboardTop = top
-        lp.y = anchorY(top)
+        val y = pendingY ?: return@Runnable
+        lp.y = y
         bubble?.let { wm.updateViewLayout(it, lp) }
     }
-    private var pendingTop: Int? = null
+    private var pendingY: Int? = null
 
     private fun show(imeTop: Int) {
         val lp = params ?: createView(imeTop)
         if (!visible.value) {
             main.removeCallbacks(reanchor)
-            keyboardTop = imeTop
             lp.y = anchorY(imeTop)
             lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
             bubble?.let { wm.updateViewLayout(it, lp) }
             visible.value = true
             return
         }
-        // Follow the keyboard only once it has settled, and ignore tiny changes.
-        val current = keyboardTop ?: imeTop
+        // Move only once the keyboard has settled, and ignore tiny changes.
+        val target = anchorY(imeTop)
         main.removeCallbacks(reanchor)
-        if (kotlin.math.abs(imeTop - current) > dp(6)) {
-            pendingTop = imeTop
+        if (kotlin.math.abs(target - lp.y) > dp(6)) {
+            pendingY = target
             main.postDelayed(reanchor, 250)
         }
     }
@@ -244,15 +245,23 @@ class BubbleService : AccessibilityService() {
         bubble?.let { wm.updateViewLayout(it, lp) }
     }
 
-    /** Just above the keys, or wherever the user last dragged it relative to the keyboard. */
-    private fun anchorY(imeTop: Int) =
-        imeTop - (Prefs.bubbleLift(this) ?: dp(BUBBLE_HEIGHT_DP + 2 * BUBBLE_MARGIN_DP + 6))
+    /**
+     * Where the bubble goes: the spot the user dragged it to (a fixed place on screen, so it
+     * never jumps with keyboard height), else just above the keys. Either way it is kept
+     * clear of the keyboard.
+     */
+    private fun anchorY(imeTop: Int): Int {
+        val aboveKeys = imeTop - dp(BUBBLE_HEIGHT_DP + 2 * BUBBLE_MARGIN_DP + 6)
+        // Older versions saved the position relative to the keyboard; convert it once.
+        Prefs.bubbleLift(this)?.let { lift -> Prefs.setBubbleY(this, imeTop - lift) }
+        val saved = Prefs.bubbleY(this) ?: return aboveKeys
+        return minOf(saved, aboveKeys)
+    }
 
     private fun hide() {
         main.removeCallbacks(reanchor)
         if (!visible.value) return
         visible.value = false
-        keyboardTop = null
         // Stay attached (invisible) for an instant next show, but let touches through.
         val lp = params ?: return
         lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
@@ -264,7 +273,8 @@ class BubbleService : AccessibilityService() {
         lp.x -= dx.roundToInt() // gravity END: x grows to the left
         lp.y += dy.roundToInt()
         bubble?.let { wm.updateViewLayout(it, lp) }
-        keyboardTop?.let { Prefs.setBubblePosition(this, lp.x, it - lp.y) }
+        Prefs.setBubbleX(this, lp.x)
+        Prefs.setBubbleY(this, lp.y)
     }
 
 

@@ -23,6 +23,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Murmur">
 
+        <!-- Qualcomm's DSP driver, used to run the speech model on the NPU -->
+        <uses-native-library
+            android:name="libcdsprpc.so"
+            android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

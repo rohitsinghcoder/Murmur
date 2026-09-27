@@ -73,26 +73,39 @@ class DictationService : Service() {
         startForeground(NOTIFICATION_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
 
         if (Engine.isLoaded) {
-            Murmur.update { it.copy(phase = Phase.Ready, error = null) }
+            Murmur.update { it.copy(phase = Phase.Ready, backend = Engine.backend, error = null) }
         } else if (Murmur.state.value.phase != Phase.Loading) {
-            Murmur.update { it.copy(phase = Phase.Loading, error = null) }
-            worker.execute {
-                val t0 = SystemClock.elapsedRealtime()
-                try {
-                    Transcriber(Engine.load(this)).run {
-                        accept(FloatArray(SAMPLE_RATE))
-                        finish()
-                    }
-                    val ms = SystemClock.elapsedRealtime() - t0
-                    Murmur.update { it.copy(phase = Phase.Ready, loadMs = ms) }
-                } catch (e: Throwable) {
-                    Murmur.update { it.copy(phase = Phase.Off, error = "Couldn't load the voice model: ${e.message}") }
-                    main.post { stopSelf() }
-                }
-            }
+            loadModel()
         }
         // Not sticky: Android won't allow restarting a mic service from the background anyway.
         return START_NOT_STICKY
+    }
+
+    private fun loadModel() {
+        Murmur.update { it.copy(phase = Phase.Loading, error = null) }
+        worker.execute {
+            val t0 = SystemClock.elapsedRealtime()
+            try {
+                // A throwaway dictation warms the model up, so the first real one is quick.
+                Engine.transcriber(this).run {
+                    accept(FloatArray(SAMPLE_RATE))
+                    finish()
+                }
+                val ms = SystemClock.elapsedRealtime() - t0
+                Murmur.update { it.copy(phase = Phase.Ready, loadMs = ms, backend = Engine.backend) }
+            } catch (e: Throwable) {
+                Murmur.update { it.copy(phase = Phase.Off, error = "Couldn't load the voice model: ${e.message}") }
+                main.post { stopSelf() }
+            }
+        }
+    }
+
+    /** Swaps in the model for the current settings (NPU or CPU). Only between dictations. */
+    fun reloadModel() {
+        if (Murmur.state.value.phase != Phase.Ready) return
+        // The worker runs dictations one at a time, so nothing is using the model meanwhile.
+        worker.execute { Engine.unload() }
+        loadModel()
     }
 
     override fun onDestroy() {
@@ -138,7 +151,7 @@ class DictationService : Service() {
     }
 
     private fun runSession(appPackage: String?, onText: (String) -> Unit) {
-        val transcriber = Transcriber(Engine.load(this))
+        val transcriber = Engine.transcriber(this)
         val audio = try {
             val minBuf = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT

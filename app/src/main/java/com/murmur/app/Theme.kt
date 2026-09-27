@@ -48,6 +48,33 @@ object Prefs {
 
     fun setBubbleY(ctx: Context, y: Int) =
         prefs(ctx).edit().putInt("bubble_y", y.coerceAtLeast(0)).remove("bubble_lift").apply()
+
+    /** Run the speech model on the NPU when the NPU model is installed. */
+    fun useNpu(ctx: Context) = prefs(ctx).getBoolean("use_npu", true)
+
+    /** Choosing a backend again also retries an NPU that failed before. */
+    fun setUseNpu(ctx: Context, on: Boolean) =
+        prefs(ctx).edit().putBoolean("use_npu", on).putBoolean("npu_failed", false).apply()
+
+    /** The NPU couldn't load on this phone; the CPU model is used instead. */
+    fun npuFailed(ctx: Context) = prefs(ctx).getBoolean("npu_failed", false)
+
+    fun setNpuFailed(ctx: Context, failed: Boolean) =
+        prefs(ctx).edit().putBoolean("npu_failed", failed).commit()
+
+    fun npuLoading(ctx: Context) = prefs(ctx).getBoolean("npu_loading", false)
+
+    /** Written synchronously: it must be on disk before native code gets a chance to crash. */
+    fun setNpuLoading(ctx: Context, loading: Boolean) =
+        prefs(ctx).edit().putBoolean("npu_loading", loading).commit()
+
+    fun language(ctx: Context): Language =
+        prefs(ctx).getString("language", null)
+            ?.let { code -> Language.entries.firstOrNull { it.code == code } }
+            ?: Language.English
+
+    fun setLanguage(ctx: Context, language: Language) =
+        prefs(ctx).edit().putString("language", language.code).apply()
 }
 
 @Composable

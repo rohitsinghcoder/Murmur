@@ -1,12 +1,20 @@
 package com.murmur.app
 
 import android.content.Context
+import android.os.Process
 import android.os.SystemClock
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-data class SpeedResult(val audioMs: Long, val decodeMs: Long, val text: String) {
+data class SpeedResult(
+    val audioMs: Long,
+    val decodeMs: Long,
+    /** Processor time Murmur used meanwhile; the NPU's work doesn't count towards it. */
+    val cpuMs: Long,
+    val backend: Backend?,
+    val text: String,
+) {
     /** How many times faster than real time the model ran. */
     val speedup get() = audioMs.toFloat() / decodeMs.coerceAtLeast(1)
 }
@@ -15,10 +23,11 @@ data class SpeedResult(val audioMs: Long, val decodeMs: Long, val text: String) 
 object SpeedTest {
     fun sample(ctx: Context) = File(Engine.modelDir(ctx), "sample.wav")
 
-    fun run(ctx: Context): SpeedResult {
-        val samples = readWav(sample(ctx))
-        val t = Transcriber(Engine.load(ctx))
+    fun run(ctx: Context, wav: File = sample(ctx)): SpeedResult {
+        val samples = readWav(wav)
+        val t = Engine.transcriber(ctx)
         val t0 = SystemClock.elapsedRealtime()
+        val cpu0 = Process.getElapsedCpuTime()
         val chunk = SAMPLE_RATE / 20
         var i = 0
         while (i < samples.size) {
@@ -26,7 +35,13 @@ object SpeedTest {
             i += chunk
         }
         val text = t.finish()
-        return SpeedResult(samples.size * 1000L / SAMPLE_RATE, SystemClock.elapsedRealtime() - t0, text)
+        return SpeedResult(
+            audioMs = samples.size * 1000L / SAMPLE_RATE,
+            decodeMs = SystemClock.elapsedRealtime() - t0,
+            cpuMs = Process.getElapsedCpuTime() - cpu0,
+            backend = Engine.backend,
+            text = text,
+        )
     }
 
     /** Reads a 16-bit mono PCM WAV file into floats. */

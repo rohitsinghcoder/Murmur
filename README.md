@@ -10,7 +10,8 @@ entirely on the phone. No internet, no account, nothing leaves the device.
 - Writes numbers the way you'd type them: "twenty twenty five" → 2025, "fifty percent" → 50%,
   "three thirty pm" → 3:30 PM, "five hundred rupees" → ₹500
 - Searchable history of everything you've dictated
-- English only for now
+- Runs on the Snapdragon NPU when available: far less work for the processor, and speaks
+  Hindi and many other languages (English only on the CPU)
 
 It uses NVIDIA's [Nemotron Speech Streaming](https://huggingface.co/nvidia) model (0.6B
 parameters, int8) through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx).
@@ -36,6 +37,10 @@ git clone https://github.com/rohitsinghcoder/Murmur.git
 cd Murmur
 ./scripts/fetch-deps.sh
 ```
+
+On a recent Snapdragon phone (8 Gen 1 or newer) use `./scripts/fetch-deps.sh --npu` instead,
+with the phone connected: it also downloads Nemotron 3.5 compiled for the phone's NPU (~420 MB)
+and Qualcomm's runtime for it. You can switch between NPU and CPU in the app.
 
 This downloads the two things that are too large for git:
 

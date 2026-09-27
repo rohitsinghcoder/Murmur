@@ -19,6 +19,8 @@ data class DictationState(
     val levels: List<Float> = emptyList(),
     val error: String? = null,
     val loadMs: Long? = null,
+    /** Where the loaded model runs. */
+    val backend: Backend? = null,
     val lastAudioMs: Long? = null,
     /** Time from tapping stop to having the final text. */
     val lastLatencyMs: Long? = null,

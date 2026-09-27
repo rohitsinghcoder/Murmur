@@ -1,7 +1,8 @@
 # Murmur
 
 Private, on-device voice typing for Android with a floating bubble (Wispr Flow style).
-English speech recognition runs fully offline. Built and run on the phone (OnePlus 15, Termux).
+Speech recognition runs fully offline, on the NPU on Snapdragon phones. Built and run on the
+phone (OnePlus 15, Termux).
 
 ## Build & run
 - `./run.sh` — builds, installs over adb (`localhost:5555`) and launches. After a reboot adb TCP
@@ -21,6 +22,20 @@ English speech recognition runs fully offline. Built and run on the phone (OnePl
 - Must live in the app's private `files/model/` (encoder/decoder/joiner `.onnx`, `tokens.txt`,
   optional `sample.wav` for the speed test). Files pushed to `Android/data/...` are unreadable to
   the app. `scripts/install-model.sh` pushes to /data/local/tmp and copies in with `run-as`.
+
+## NPU (Snapdragon)
+- Optional second model: Nemotron 3.5 (multilingual) compiled for one Snapdragon chip as QNN
+  context binaries, in `files/model-npu/` (`encoder/decoder/joiner.bin`, `tokens.txt`, `soc.txt`
+  naming the chip). Used when `soc.txt` matches `Build.SOC_MODEL` and the user picks NPU.
+- `scripts/fetch-deps.sh --npu` builds `app/libs/sherpa-onnx-1.13.8-qnn.aar`: the plain AAR with
+  arm64 native code taken from sherpa-onnx's prebuilt QNN demo APK (no QNN AAR is published).
+  Gradle uses it when present. `jniLibs.useLegacyPackaging` is required (the DSP loads
+  `libQnnHtpV*Skel.so` from the native lib dir) and `modelType = "nemo_transducer"` is required.
+- Native QNN failures abort the process, so `Engine` writes an `npu_loading` flag before
+  loading; a load that never finished marks the NPU failed and the CPU model is used.
+- Measured on SM8850 (6.6 s clip): NPU ~2.0 s wall / ~0.3 s CPU time; CPU ~1.2 s wall /
+  ~5 s CPU time. NPU output had slightly less punctuation on that clip.
+- `scripts/benchmark.sh [runs] [wav]` (debug builds) compares both backends via logcat.
 
 ## Layout (`app/src/main/java/com/murmur/app/`)
 - `Engine.kt` — loads the model once; `Transcriber` streams audio and returns running text.

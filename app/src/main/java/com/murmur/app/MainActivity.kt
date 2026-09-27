@@ -60,6 +60,9 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarDuration
@@ -152,6 +155,7 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
         ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
     }
     val modelInstalled = remember(resumeTick) { Engine.isModelInstalled(ctx) }
+    val npuInstalled = remember(resumeTick) { Engine.isNpuInstalled(ctx) }
     val bubbleOn = remember(resumeTick) { bubbleEnabled(ctx) }
     val batteryFree = remember(resumeTick) {
         ctx.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
@@ -205,7 +209,7 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
                         }
                         SetupRow(
                             "Voice model",
-                            if (modelInstalled) "Nemotron Speech Streaming · English · on-device"
+                            if (modelInstalled) "Nemotron · runs entirely on your phone"
                             else "Not found in ${Engine.modelDir(ctx).path}",
                             done = modelInstalled,
                             action = null,
@@ -232,6 +236,13 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
                             )
                         }
                     }
+                }
+            }
+
+            if (npuInstalled) {
+                item(key = "voice-label") { SectionLabel("Voice") }
+                item(key = "voice") {
+                    VoiceCard(state, cpuInstalled = Engine.isCpuInstalled(ctx), tick = resumeTick)
                 }
             }
 
@@ -394,7 +405,7 @@ private fun StatusCard(state: DictationState, canStart: Boolean, onStart: () -> 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 state.loadMs?.takeIf { on }?.let {
                     Text(
-                        "Model loaded in ${seconds(it)}",
+                        "Model loaded in ${seconds(it)}" + (state.backend?.let { b -> " · ${b.label}" } ?: ""),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -558,6 +569,92 @@ private fun stats(state: DictationState): String? {
     return "Last: ${seconds(audio)} of speech · text ${latency} ms after stop"
 }
 
+/** Where the model runs (NPU or CPU) and, for the multilingual NPU model, the language. */
+@Composable
+private fun VoiceCard(state: DictationState, cpuInstalled: Boolean, tick: Int) {
+    val ctx = LocalContext.current
+    var useNpu by remember { mutableStateOf(Prefs.useNpu(ctx)) }
+    var language by remember { mutableStateOf(Prefs.language(ctx)) }
+    val npuFailed = remember(tick, state.backend) { Prefs.npuFailed(ctx) }
+    // Switching reloads the model, which can't happen mid-dictation or mid-load.
+    val canSwitch = state.phase == Phase.Off || state.phase == Phase.Ready
+    val onNpu = (state.backend ?: Engine.preferredBackend(ctx)) == Backend.Npu
+
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(18.dp).animateContentSize()) {
+            if (cpuInstalled) {
+                Text("Runs on", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(10.dp))
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    Backend.entries.forEachIndexed { i, b ->
+                        SegmentedButton(
+                            selected = (b == Backend.Npu) == useNpu,
+                            onClick = {
+                                val npu = b == Backend.Npu
+                                if (npu == useNpu && !(npu && npuFailed)) return@SegmentedButton
+                                useNpu = npu
+                                Prefs.setUseNpu(ctx, npu)
+                                DictationService.instance?.reloadModel()
+                            },
+                            enabled = canSwitch,
+                            shape = SegmentedButtonDefaults.itemShape(i, Backend.entries.size),
+                        ) { Text(b.label) }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    if (useNpu) "Snapdragon's AI chip. Leaves the processor almost idle, so it's " +
+                        "easier on the battery, and understands many languages."
+                    else "The main processor, with the English-only model. Works the phone much harder.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (useNpu && npuFailed) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "The NPU couldn't start, so Murmur used the CPU. Tap NPU to try again.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+            AnimatedVisibility(onNpu || (useNpu && !npuFailed)) {
+                Column {
+                    if (cpuInstalled) Spacer(Modifier.height(20.dp))
+                    Text("Language", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(10.dp))
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        Language.entries.forEachIndexed { i, l ->
+                            SegmentedButton(
+                                selected = l == language,
+                                onClick = {
+                                    language = l
+                                    Prefs.setLanguage(ctx, l)
+                                },
+                                shape = SegmentedButtonDefaults.itemShape(i, Language.entries.size),
+                            ) { Text(l.label, maxLines = 1) }
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        when (language) {
+                            Language.English -> "Best accuracy for English."
+                            Language.Hindi -> "For speaking Hindi."
+                            Language.Auto -> "Recognises the language as you speak. Handy when you switch."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun SpeedCard(enabled: Boolean) {
     val ctx = LocalContext.current
@@ -608,7 +705,13 @@ private fun SpeedCard(enabled: Boolean) {
                     color = MaterialTheme.colorScheme.primary,
                 )
                 Text(
-                    "${seconds(r.audioMs)} of audio in ${seconds(r.decodeMs)}",
+                    "${seconds(r.audioMs)} of audio in ${seconds(r.decodeMs)}" +
+                        (r.backend?.let { " on the ${it.label}" } ?: ""),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "${seconds(r.cpuMs)} of processor time",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

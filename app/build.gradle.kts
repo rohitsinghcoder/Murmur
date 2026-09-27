@@ -29,6 +29,12 @@ android {
     buildFeatures {
         compose = true
     }
+
+    packaging {
+        // Store native libraries as real files: the NPU runtime (libQnnHtpV81Skel.so) is loaded
+        // by the phone's DSP from the app's library folder, which can't read inside the APK.
+        jniLibs.useLegacyPackaging = true
+    }
 }
 
 kotlin {
@@ -40,7 +46,9 @@ kotlin {
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.08.00")
     implementation(composeBom)
-    implementation(files("libs/sherpa-onnx-1.13.8.aar"))
+    // The NPU build (scripts/fetch-deps.sh --npu) adds Qualcomm's QNN runtime to sherpa-onnx.
+    val qnnAar = file("libs/sherpa-onnx-1.13.8-qnn.aar")
+    implementation(files(if (qnnAar.exists()) qnnAar else file("libs/sherpa-onnx-1.13.8.aar")))
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.compose.material3:material3")

@@ -3,6 +3,7 @@ package com.murmur.app
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.text.format.DateFormat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -67,6 +69,11 @@ import java.util.Locale
 fun copyText(ctx: Context, text: String) {
     ctx.getSystemService(ClipboardManager::class.java)
         .setPrimaryClip(ClipData.newPlainText("Murmur", text))
+}
+
+fun shareText(ctx: Context, text: String) {
+    val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+    ctx.startActivity(Intent.createChooser(send, null))
 }
 
 /** "Today", "Yesterday", or a short date such as "Mon, 22 Sep". */
@@ -105,8 +112,12 @@ fun HistoryScreen(
     var query by remember { mutableStateOf("") }
     var confirmClear by remember { mutableStateOf(false) }
     val shown = remember(items, query) {
-        if (query.isBlank()) items else items.filter { it.text.contains(query.trim(), ignoreCase = true) }
+        val q = query.trim()
+        if (q.isEmpty()) items
+        else items.filter { it.text.contains(q, ignoreCase = true) || it.app?.contains(q, ignoreCase = true) == true }
     }
+    // Day labels need a calendar per entry; work them out once per list, not per frame.
+    val days = remember(shown) { shown.groupBy { dayLabel(ctx, it.at) } }
     val todayStart = remember { startOfDay(0) }
     val wordsToday = remember(items) { items.filter { it.at >= todayStart }.sumOf { it.words } }
     val wordsTotal = remember(items) { items.sumOf { it.words } }
@@ -204,7 +215,7 @@ fun HistoryScreen(
                 }
             }
 
-            shown.groupBy { dayLabel(ctx, it.at) }.forEach { (day, entries) ->
+            days.forEach { (day, entries) ->
                 item(key = "day-$day") {
                     Text(
                         day,
@@ -229,7 +240,12 @@ fun HistoryScreen(
         AlertDialog(
             onDismissRequest = { confirmClear = false },
             title = { Text("Clear history?") },
-            text = { Text("All ${items.size} saved dictations will be deleted from this phone.") },
+            text = {
+                Text(
+                    if (items.size == 1) "Your saved dictation will be deleted from this phone."
+                    else "All ${items.size} saved dictations will be deleted from this phone."
+                )
+            },
             confirmButton = {
                 TextButton(onClick = { confirmClear = false; onClearAll() }) { Text("Clear") }
             },
@@ -285,39 +301,61 @@ private fun SearchField(query: String, onChange: (String) -> Unit) {
     }
 }
 
-/** One saved dictation. Tap copies it; long-press offers to delete it. */
+/** One saved dictation. Tap copies it; long-press offers copy, share and delete. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DictationRow(d: Dictation, modifier: Modifier, onCopy: () -> Unit, onDelete: (() -> Unit)?) {
     val ctx = LocalContext.current
     val haptics = LocalHapticFeedback.current
     var confirmDelete by remember { mutableStateOf(false) }
-    Surface(
-        shape = RoundedCornerShape(22.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).combinedClickable(
-            onClick = onCopy,
-            onLongClick = onDelete?.let {
-                {
+    var menu by remember { mutableStateOf(false) }
+    Box(modifier) {
+        Surface(
+            shape = RoundedCornerShape(22.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).combinedClickable(
+                onClickLabel = "Copy",
+                onClick = onCopy,
+                onLongClickLabel = "More options",
+                onLongClick = {
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    confirmDelete = true
-                }
-            },
-        ),
-    ) {
-        Column(Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
-            Text(
-                d.text,
-                style = MaterialTheme.typography.bodyLarge,
-                maxLines = 6,
-                overflow = TextOverflow.Ellipsis,
+                    menu = true
+                },
+            ),
+        ) {
+            Column(Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
+                Text(
+                    d.text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 6,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    metaLine(ctx, d),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        DropdownMenu(
+            expanded = menu,
+            onDismissRequest = { menu = false },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+        ) {
+            DropdownMenuItem(
+                text = { Text("Share") },
+                leadingIcon = { Icon(Icons.Rounded.Share, contentDescription = null) },
+                onClick = { menu = false; shareText(ctx, d.text) },
             )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                metaLine(ctx, d),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (onDelete != null) {
+                DropdownMenuItem(
+                    text = { Text("Delete") },
+                    leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+                    onClick = { menu = false; confirmDelete = true },
+                )
+            }
         }
     }
     if (confirmDelete && onDelete != null) {

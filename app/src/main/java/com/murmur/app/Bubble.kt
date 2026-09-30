@@ -52,6 +52,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -81,10 +83,13 @@ private val Soft = Color(0xB3FFFFFF)
 @Composable
 fun Bubble(
     visible: Boolean,
+    /** The bubble sits on the left half of the screen, so the pill widens to the right. */
+    growRight: Boolean,
     insertedTick: Int,
     onTap: () -> Unit,
     onCancel: () -> Unit,
-    onDrag: (Float, Float) -> Unit,
+    onDragStart: () -> Unit,
+    onDrag: () -> Unit,
     onDragEnd: () -> Unit,
 ) {
     val state by Murmur.state.collectAsState()
@@ -121,10 +126,17 @@ fun Bubble(
         label = "mark",
     )
     val shape = RoundedCornerShape(BUBBLE_HEIGHT_DP.dp / 2)
+    val side = if (growRight) Alignment.CenterStart else Alignment.CenterEnd
+    val label = when {
+        active -> "Stop and type what you said"
+        state.phase == Phase.Off -> "Murmur is off. Open Murmur"
+        state.phase == Phase.Loading -> "Murmur is loading"
+        else -> "Dictate"
+    }
 
     Box(
         Modifier.fillMaxSize().padding(BUBBLE_MARGIN_DP.dp),
-        contentAlignment = Alignment.CenterEnd,
+        contentAlignment = side,
     ) {
         AnimatedVisibility(
             visible,
@@ -140,18 +152,24 @@ fun Bubble(
                     .background(Ink)
                     .border(1.dp, Edge, shape)
                     .pointerInput(Unit) {
-                        detectDragGestures(onDragEnd = onDragEnd, onDragCancel = onDragEnd) { change, amount ->
+                        detectDragGestures(
+                            onDragStart = { onDragStart() },
+                            onDragEnd = onDragEnd,
+                            onDragCancel = onDragEnd,
+                        ) { change, _ ->
                             change.consume()
-                            onDrag(amount.x, amount.y)
+                            onDrag()
                         }
                     }
+                    .semantics { contentDescription = label }
                     .clickable(onClick = onTap),
-                contentAlignment = Alignment.CenterEnd,
+                contentAlignment = side,
             ) {
                 if (pillAlpha > 0f) {
                     // Laid out at full width and revealed by the growing clip, so nothing squashes.
                     Box(
-                        Modifier.fillMaxHeight().wrapContentWidth(Alignment.End, unbounded = true)
+                        Modifier.fillMaxHeight()
+                            .wrapContentWidth(if (growRight) Alignment.Start else Alignment.End, unbounded = true)
                             .requiredWidth(PILL_WIDTH_DP.dp).alpha(pillAlpha),
                     ) {
                         ListeningPill(pill, onCancel = onCancel, onStop = onTap)
@@ -190,17 +208,18 @@ fun Bubble(
 
 @Composable
 private fun ListeningPill(state: DictationState, onCancel: () -> Unit, onStop: () -> Unit) {
+    // Buttons get the pill's full height as their touch area; the visible circles stay small.
     Row(
-        Modifier.fillMaxSize().padding(horizontal = 6.dp),
+        Modifier.fillMaxSize(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(32.dp).clip(CircleShape).clickable(onClick = onCancel),
+            Modifier.size(BUBBLE_HEIGHT_DP.dp).clip(CircleShape).clickable(onClick = onCancel),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Rounded.Close, "Cancel", tint = Soft, modifier = Modifier.size(16.dp))
+            Icon(Icons.Rounded.Close, "Cancel dictation", tint = Soft, modifier = Modifier.size(16.dp))
         }
-        Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
+        Column(Modifier.weight(1f)) {
             Waveform(state.levels, Modifier.fillMaxWidth().height(14.dp))
             Spacer(Modifier.height(1.dp))
             Text(
@@ -212,13 +231,20 @@ private fun ListeningPill(state: DictationState, onCancel: () -> Unit, onStop: (
             )
         }
         Box(
-            Modifier.size(32.dp).clip(CircleShape).background(Color.White).clickable(onClick = onStop),
+            Modifier.size(BUBBLE_HEIGHT_DP.dp).clip(CircleShape)
+                .semantics { contentDescription = "Stop and type" }
+                .clickable(onClick = onStop),
             contentAlignment = Alignment.Center,
         ) {
-            if (state.phase == Phase.Finishing) {
-                CircularProgressIndicator(color = Ink, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
-            } else {
-                Box(Modifier.size(11.dp).clip(RoundedCornerShape(3.dp)).background(Ink))
+            Box(
+                Modifier.size(32.dp).clip(CircleShape).background(Color.White),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (state.phase == Phase.Finishing) {
+                    CircularProgressIndicator(color = Ink, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+                } else {
+                    Box(Modifier.size(11.dp).clip(RoundedCornerShape(3.dp)).background(Ink))
+                }
             }
         }
     }

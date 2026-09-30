@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -133,6 +134,11 @@ private fun bubbleEnabled(ctx: Context): Boolean {
     return enabled.split(':').any { it.equals(full, true) || it.equals(short, true) }
 }
 
+/** The Murmur voice keyboard is turned on under Settings → Keyboards. */
+private fun keyboardEnabled(ctx: Context): Boolean =
+    ctx.getSystemService(InputMethodManager::class.java).enabledInputMethodList
+        .any { it.packageName == ctx.packageName }
+
 @Composable
 private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) -> Unit) {
     val ctx = LocalContext.current
@@ -145,7 +151,8 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
 
     fun copy(d: Dictation) {
         copyText(ctx, d.text)
-        scope.launch {
+        // Android 13+ confirms copies itself; a snackbar on top would say it twice.
+        if (android.os.Build.VERSION.SDK_INT < 33) scope.launch {
             snackbar.currentSnackbarData?.dismiss()
             snackbar.showSnackbar("Copied to clipboard", duration = SnackbarDuration.Short)
         }
@@ -157,6 +164,7 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
     val modelInstalled = remember(resumeTick) { Engine.isModelInstalled(ctx) }
     val npuInstalled = remember(resumeTick) { Engine.isNpuInstalled(ctx) }
     val bubbleOn = remember(resumeTick) { bubbleEnabled(ctx) }
+    val keyboardOn = remember(resumeTick) { keyboardEnabled(ctx) }
     val batteryFree = remember(resumeTick) {
         ctx.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
     }
@@ -215,8 +223,18 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
                             action = null,
                         ) {}
                         SetupRow(
-                            "Bubble in other apps",
-                            "Accessibility lets Murmur type into any text field",
+                            "Enable Murmur keyboard",
+                            "Dictate from your keyboard's mic key. Needs no accessibility, " +
+                                "so it works alongside banking apps",
+                            done = keyboardOn,
+                            action = "Turn on",
+                        ) {
+                            ctx.startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+                        }
+                        SetupRow(
+                            "Bubble in other apps (optional)",
+                            "Uses accessibility to type into any field. Some banking apps " +
+                                "won't run while it's on",
                             done = bubbleOn,
                             action = "Turn on",
                         ) {
@@ -529,7 +547,10 @@ private fun TryCard(state: DictationState) {
                     label = "mic",
                 )
                 Box(
-                    Modifier.size(56.dp).clip(CircleShape).background(bg).clickable(enabled = ready || listening) {
+                    Modifier.size(56.dp).clip(CircleShape).background(bg).clickable(
+                        enabled = ready || listening,
+                        onClickLabel = if (listening) "Stop" else "Dictate here",
+                    ) {
                         val service = DictationService.instance ?: return@clickable
                         if (listening) service.finish()
                         else service.listen { result ->

@@ -22,11 +22,30 @@ object Numbers {
     private val percent = Regex("^[ -]?(?:percent|per cent)\\b", RegexOption.IGNORE_CASE)
     private val currency = Regex("^ (dollars?|rupees?|euros?)\\b", RegexOption.IGNORE_CASE)
     private val ampm = Regex("^ ?([ap])\\.? ?m(?![a-z])(\\.)?", RegexOption.IGNORE_CASE)
+    /** "Which one am I?": a bare "am" followed by "I" is the verb. */
+    private val amVerb = Regex("^ ?am [Ii]\\b")
     private val keepsDigits = Regex("^ (?:lakhs?|crores?|o'clock)\\b", RegexOption.IGNORE_CASE)
-    private val decadeNext = Regex("^ (?:\\w+ties|hundreds|thousands|millions)\\b", RegexOption.IGNORE_CASE)
+    private val decadeNext = Regex(
+        "^ (?:twenties|thirties|forties|fifties|sixties|seventies|eighties|nineties|hundreds|thousands|millions)\\b",
+        RegexOption.IGNORE_CASE,
+    )
+    /** An ordinal right after the number: "twenty-first", "one hundred and first", "twenty second". */
+    private val ordinalNext = Regex(
+        "^(?:[ -]+and)?[ -]+(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|" +
+            "tenth|eleventh|twelfth|\\w+teenth|\\w+ieth|hundredth|thousandth|millionth|billionth)\\b",
+        RegexOption.IGNORE_CASE,
+    )
+    private val ordinalUnits = mapOf(
+        "first" to "1st", "third" to "3rd", "fourth" to "4th", "fifth" to "5th",
+        "sixth" to "6th", "seventh" to "7th", "eighth" to "8th", "ninth" to "9th",
+    )
+    /** The run continues a number that was left as words: "a hundred and fifty". */
+    private val scaleBefore = Regex("(?:hundred|thousand|million|billion)(?:[ -]+and)?[ -]+$", RegexOption.IGNORE_CASE)
     private val timeCues = setOf("at", "by", "around", "till", "until", "from", "after", "before", "about")
 
     private enum class Kind { None, Unit, Teen, Tens, Hundred, Scale }
+    private val beforeUnit = setOf(Kind.None, Kind.Tens, Kind.Hundred, Kind.Scale)
+    private val beforeTens = setOf(Kind.None, Kind.Hundred, Kind.Scale)
 
     /** One number within a run of number words. */
     private class Num(
@@ -73,7 +92,8 @@ object Numbers {
             val prev = words.getOrNull(i - 1)?.takeIf {
                 text.substring(it.range.last + 1, first.range.first).isBlank()
             }?.value?.lowercase()
-            val written = write(items, run.first(), prev, text.substring(end))
+            val continues = scaleBefore.containsMatchIn(text.substring(maxOf(0, first.range.first - 20), first.range.first))
+            val written = if (continues) null else write(items, run.first(), prev, text.substring(end))
             if (written != null) {
                 out.append(text, pos, first.range.first).append(written.first)
                 pos = end + written.second
@@ -123,8 +143,8 @@ object Numbers {
                 "point" -> {
                     var j = i + 1
                     val digits = StringBuilder()
-                    while (j < w.size && (small(w[j]) ?: 10) < 10) {
-                        digits.append(small(w[j]))
+                    while (j < w.size && (w[j] == "oh" || (small(w[j]) ?: 10) < 10)) {
+                        digits.append(small(w[j]) ?: 0)
                         j++
                     }
                     if (count == 0 || digits.isEmpty()) break@loop
@@ -149,8 +169,8 @@ object Numbers {
                 else -> Kind.Tens
             }
             val fits = when (kind) {
-                Kind.Unit -> if (v == 0) last == Kind.None else last in setOf(Kind.None, Kind.Tens, Kind.Hundred, Kind.Scale)
-                Kind.Teen, Kind.Tens -> last in setOf(Kind.None, Kind.Hundred, Kind.Scale)
+                Kind.Unit -> if (v == 0) last == Kind.None else last in beforeUnit
+                Kind.Teen, Kind.Tens -> last in beforeTens
                 Kind.Hundred -> (last == Kind.Unit || last == Kind.Teen) && cur in 1..99
                 Kind.Scale -> last != Kind.None && cur > 0 && scales.getValue(t) < lastScale
                 Kind.None -> false
@@ -185,6 +205,17 @@ object Numbers {
         if (items.isEmpty()) return null
         val a = items[0]
 
+        // Ordinals stay words ("one hundred and first", "the twenty second"), except a tens
+        // word and an ordinal unit written together: "twenty-first" → 21st.
+        ordinalNext.find(rest)?.let {
+            val unit = ordinalUnits[it.groupValues[1].lowercase()]
+            val tens = a.value % 100 in 20..90 && a.value % 10 == 0L && a.decimals.isEmpty() && a.scale == null
+            if (unit != null && items.size == 1 && tens && !it.value.contains("and", ignoreCase = true)) {
+                return "${a.value / 10}${unit}" to it.value.length
+            }
+            return null
+        }
+
         // Years: "nineteen ninety nine", "twenty twenty five", "twenty oh five".
         if (firstWord == "nineteen" || firstWord == "twenty") {
             if (items.size == 2 && a.words == 1 && items[1].decimals.isEmpty() && !items[1].oh && items[1].value in 10..99) {
@@ -199,8 +230,9 @@ object Numbers {
         }
 
         // Times: "three thirty pm", "at ten fifteen", "seven am".
-        val meridiem = ampm.find(rest)
-        if (a.words == 1 && a.value in 1..12 && (meridiem != null || (prev != null && prev in timeCues))) {
+        val meridiem = ampm.find(rest)?.takeUnless { amVerb.containsMatchIn(rest) }
+        val unitNext = percent.containsMatchIn(rest) || currency.containsMatchIn(rest) // "about three fifty dollars"
+        if (a.words == 1 && a.value in 1..12 && !unitNext && (meridiem != null || (prev != null && prev in timeCues))) {
             val minutes = when {
                 items.size == 2 && items[1].decimals.isEmpty() && !items[1].oh && items[1].value in 10..59 -> items[1].value
                 items.size == 3 && items[1].oh && items[2].digit && items[2].value > 0 -> items[2].value
@@ -214,7 +246,7 @@ object Numbers {
                 (if (endsSentence) "$m." else m) to it.value.length
             }
             if (minutes != null) {
-                return "${a.value}:${"%02d".format(minutes)}${suffix?.first.orEmpty()}" to (suffix?.second ?: 0)
+                return "${a.value}:${minutes.toString().padStart(2, '0')}${suffix?.first.orEmpty()}" to (suffix?.second ?: 0)
             }
             if (items.size == 1 && suffix != null) return "${a.value}${suffix.first}" to suffix.second
         }

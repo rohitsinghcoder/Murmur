@@ -46,8 +46,9 @@ class BenchmarkReceiver : BroadcastReceiver() {
             val r = SpeedTest.run(ctx, wav)
             Log.i(
                 TAG,
+                // Only the number goes through format(): a "%" in the transcript would throw.
                 "$backend load=${loadMs}ms audio=${r.audioMs}ms decode=${r.decodeMs}ms " +
-                    "speed=%.1fx cpu=${r.cpuMs}ms text=\"${r.text}\"".format(r.speedup),
+                    "speed=${"%.1f".format(r.speedup)}x cpu=${r.cpuMs}ms text=\"${r.text}\"",
             )
         }
     }

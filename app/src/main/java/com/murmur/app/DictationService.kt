@@ -56,6 +56,15 @@ class DictationService : Service() {
     @Volatile private var recording = false
     @Volatile private var cancelled = false
 
+    /** Set in [onDestroy]: work still finishing on the worker must not report Ready. */
+    @Volatile private var destroyed = false
+
+    /** Why the microphone stopped delivering audio in the current dictation, if it did. */
+    @Volatile private var micError: String? = null
+
+    /** The phase to return to after a dictation or load. */
+    private val idle get() = if (destroyed) Phase.Off else Phase.Ready
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -70,9 +79,19 @@ class DictationService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        startForeground(NOTIFICATION_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        try {
+            startForeground(NOTIFICATION_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        } catch (e: Exception) {
+            // Android 14+ refuses a microphone service without the mic permission or when the
+            // app isn't on screen; that throws here instead of crashing the app.
+            Murmur.update { it.copy(phase = Phase.Off, error = "Couldn't start Murmur: ${e.message}") }
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
-        if (Engine.isLoaded) {
+        if (Murmur.state.value.phase.isActive) {
+            // Started again mid-dictation: leave it running.
+        } else if (Engine.isLoaded) {
             Murmur.update { it.copy(phase = Phase.Ready, backend = Engine.backend, error = null) }
         } else if (Murmur.state.value.phase != Phase.Loading) {
             loadModel()
@@ -88,11 +107,15 @@ class DictationService : Service() {
             try {
                 // A throwaway dictation warms the model up, so the first real one is quick.
                 Engine.transcriber(this).run {
-                    accept(FloatArray(SAMPLE_RATE))
-                    finish()
+                    try {
+                        accept(FloatArray(SAMPLE_RATE))
+                        finish()
+                    } finally {
+                        release()
+                    }
                 }
                 val ms = SystemClock.elapsedRealtime() - t0
-                Murmur.update { it.copy(phase = Phase.Ready, loadMs = ms, backend = Engine.backend) }
+                Murmur.update { it.copy(phase = idle, loadMs = ms, backend = Engine.backend) }
             } catch (e: Throwable) {
                 Murmur.update { it.copy(phase = Phase.Off, error = "Couldn't load the voice model: ${e.message}") }
                 main.post { stopSelf() }
@@ -102,16 +125,20 @@ class DictationService : Service() {
 
     /** Swaps in the model for the current settings (NPU or CPU). Only between dictations. */
     fun reloadModel() {
-        if (Murmur.state.value.phase != Phase.Ready) return
+        if (destroyed || Murmur.state.value.phase != Phase.Ready) return
         // The worker runs dictations one at a time, so nothing is using the model meanwhile.
         worker.execute { Engine.unload() }
         loadModel()
     }
 
     override fun onDestroy() {
+        destroyed = true
         cancel()
         instance = null
         Murmur.update { it.copy(phase = Phase.Off, partial = "", levels = emptyList()) }
+        // Murmur is off: give the model's memory back (hundreds of MB) once the worker is
+        // done. The process stays alive for the bubble, so otherwise it would never be freed.
+        worker.execute { Engine.unload() }
         worker.shutdown()
         super.onDestroy()
     }
@@ -121,7 +148,9 @@ class DictationService : Service() {
      * also saved to [History], tagged with [appPackage] (the app it is typed into).
      */
     fun listen(appPackage: String? = null, onText: (String) -> Unit): Boolean {
-        if (Murmur.state.value.phase != Phase.Ready) return false
+        if (destroyed || Murmur.state.value.phase != Phase.Ready) return false
+        // The voice keyboard may be using the microphone and the model right now.
+        if (!MicGate.acquire(this)) return false
         recording = true
         cancelled = false
         Murmur.update { it.copy(phase = Phase.Listening, partial = "", levels = emptyList(), error = null) }
@@ -132,8 +161,10 @@ class DictationService : Service() {
                 // Never leave the bubble stuck in the listening pill.
                 recording = false
                 Murmur.update {
-                    it.copy(phase = Phase.Ready, partial = "", levels = emptyList(), error = "Dictation failed: ${e.message}")
+                    it.copy(phase = idle, partial = "", levels = emptyList(), error = "Dictation failed: ${e.message}")
                 }
+            } finally {
+                MicGate.release(this@DictationService)
             }
         }
         return true
@@ -151,7 +182,7 @@ class DictationService : Service() {
     }
 
     private fun runSession(appPackage: String?, onText: (String) -> Unit) {
-        val transcriber = Engine.transcriber(this)
+        micError = null
         val audio = try {
             val minBuf = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT
@@ -165,65 +196,84 @@ class DictationService : Service() {
                 max(minBuf, SAMPLE_RATE * 4 * 2),
             )
         } catch (e: SecurityException) {
-            fail(transcriber, "Microphone permission is missing.")
+            fail("Microphone permission is missing.")
+            return
+        } catch (e: IllegalArgumentException) {
+            fail("The microphone is busy or unavailable.")
             return
         }
         if (audio.state != AudioRecord.STATE_INITIALIZED) {
             audio.release()
-            fail(transcriber, "The microphone is busy or unavailable.")
+            fail("The microphone is busy or unavailable.")
             return
         }
 
         // The mic is read on its own thread and queued, so a slow decode step never makes the
-        // recorder drop audio, and everything said before the tap still gets transcribed.
+        // recorder drop audio, and everything said before the tap still gets transcribed. It
+        // starts before the model's stream is set up, so the first word isn't clipped.
         val queue = LinkedBlockingQueue<FloatArray>()
         val reader = Thread({ record(audio, queue) }, "murmur-mic")
         reader.start()
-        var samples = 0L
-        val pending = ArrayList<FloatArray>()
-        while (true) {
-            pending.add(queue.take())
-            // Catch up in one step if audio queued up while the last chunk was decoding.
-            queue.drainTo(pending)
-            val ended = pending.removeAll { it === END }
-            if (!cancelled) {
-                val chunk = concat(pending)
-                if (chunk.isNotEmpty()) {
-                    samples += chunk.size
-                    val text = Cleanup.tidy(transcriber.accept(chunk))
-                    Murmur.update { it.copy(partial = text) }
+        var transcriber: Transcriber? = null
+        try {
+            val t = Engine.transcriber(this).also { transcriber = it }
+            var samples = 0L
+            val pending = ArrayList<FloatArray>()
+            while (true) {
+                pending.add(queue.take())
+                // Catch up in one step if audio queued up while the last chunk was decoding.
+                queue.drainTo(pending)
+                val ended = pending.removeAll { it === END }
+                if (!cancelled) {
+                    val chunk = concat(pending)
+                    if (chunk.isNotEmpty()) {
+                        samples += chunk.size
+                        val text = Cleanup.tidy(t.accept(chunk))
+                        Murmur.update { it.copy(partial = text) }
+                    }
+                }
+                pending.clear()
+                if (ended) break
+            }
+
+            if (cancelled) {
+                Murmur.update { it.copy(phase = idle, partial = "", levels = emptyList()) }
+                return
+            }
+            Murmur.update { it.copy(phase = Phase.Finishing) }
+            val t0 = SystemClock.elapsedRealtime()
+            val text = Cleanup.tidy(t.finish())
+            val latency = SystemClock.elapsedRealtime() - t0
+            // Nothing came through because the mic failed or another app holds it: say so
+            // instead of silently typing nothing.
+            val problem = micError.takeIf { text.isBlank() }
+            // Insert first, then leave the active phase: the pill then collapses straight into
+            // the check mark instead of flashing the idle icon in between.
+            val audioMs = samples * 1000 / SAMPLE_RATE
+            main.post {
+                if (text.isNotBlank()) {
+                    onText(text)
+                    History.add(this, text, audioMs, appPackage)
+                }
+                Murmur.update {
+                    it.copy(
+                        phase = idle,
+                        partial = "",
+                        levels = emptyList(),
+                        error = problem,
+                        lastLatencyMs = latency,
+                        lastAudioMs = audioMs,
+                    )
                 }
             }
-            pending.clear()
-            if (ended) break
-        }
-
-        if (cancelled) {
-            transcriber.release()
-            Murmur.update { it.copy(phase = Phase.Ready, partial = "", levels = emptyList()) }
-            return
-        }
-        Murmur.update { it.copy(phase = Phase.Finishing) }
-        val t0 = SystemClock.elapsedRealtime()
-        val text = Cleanup.tidy(transcriber.finish())
-        val latency = SystemClock.elapsedRealtime() - t0
-        // Insert first, then leave the active phase: the pill then collapses straight into
-        // the check mark instead of flashing the idle icon in between.
-        val audioMs = samples * 1000 / SAMPLE_RATE
-        main.post {
-            if (text.isNotBlank()) {
-                onText(text)
-                History.add(this, text, audioMs, appPackage)
-            }
-            Murmur.update {
-                it.copy(
-                    phase = Phase.Ready,
-                    partial = "",
-                    levels = emptyList(),
-                    lastLatencyMs = latency,
-                    lastAudioMs = audioMs,
-                )
-            }
+        } catch (e: Throwable) {
+            // Stop the recorder as well; it frees the mic after its current 50 ms read.
+            cancelled = true
+            recording = false
+            reader.join(500)
+            throw e
+        } finally {
+            transcriber?.release()
         }
     }
 
@@ -234,10 +284,18 @@ class DictationService : Service() {
         var stopAt = Long.MAX_VALUE
         try {
             audio.startRecording()
+            if (audio.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                micError = "The microphone is busy or unavailable."
+                return
+            }
             while (!cancelled && SystemClock.elapsedRealtime() < stopAt) {
                 if (!recording && stopAt == Long.MAX_VALUE) stopAt = SystemClock.elapsedRealtime() + TAIL_MS
                 val n = audio.read(buf, 0, buf.size, AudioRecord.READ_BLOCKING)
-                if (n < 0) break
+                if (n < 0) {
+                    // Permission revoked or the audio server died: keep what was heard so far.
+                    micError = "The microphone stopped working."
+                    break
+                }
                 if (n == 0) continue
                 val chunk = buf.copyOf(n)
                 queue.put(chunk)
@@ -245,6 +303,14 @@ class DictationService : Service() {
                 if (levels.size > 36) levels.removeFirst()
                 Murmur.update { it.copy(levels = levels.toList()) }
             }
+            // Android silences an app's recording (all zeros, no error) while another app,
+            // such as a call, holds the mic.
+            if (runCatching { audio.activeRecordingConfiguration?.isClientSilenced == true }.getOrDefault(false)) {
+                micError = "Another app is using the microphone."
+            }
+        } catch (e: Exception) {
+            // An exception escaping this thread would crash the whole app.
+            micError = "The microphone is busy or unavailable."
         } finally {
             runCatching { audio.stop() }
             audio.release()
@@ -263,9 +329,8 @@ class DictationService : Service() {
         return out
     }
 
-    private fun fail(transcriber: Transcriber, message: String) {
-        transcriber.release()
-        Murmur.update { it.copy(phase = Phase.Ready, partial = "", levels = emptyList(), error = message) }
+    private fun fail(message: String) {
+        Murmur.update { it.copy(phase = idle, partial = "", levels = emptyList(), error = message) }
     }
 
     /** Loudness of a chunk mapped to 0..1: room noise stays near 0, normal speech fills it. */

@@ -110,18 +110,47 @@ object Engine {
     }
 
     /** Loads the model if needed and starts a dictation in the chosen language. */
+    @Synchronized
     fun transcriber(ctx: Context): Transcriber {
         val rec = load(ctx)
         // Only the multilingual NPU model takes a language; the CPU model is English-only.
         return Transcriber(rec, Prefs.language(ctx).code.takeIf { backend == Backend.Npu })
     }
 
-    /** Frees the model, so the next [load] picks the backend again. */
+    /**
+     * Frees the model, so the next [load] picks the backend again. A model still used by a
+     * [Transcriber] (a dictation, the speed test) is freed when that one is released instead:
+     * native code running on a freed model crashes the whole app.
+     */
     @Synchronized
     fun unload() {
-        recognizer?.release()
-        recognizer = null
-        backend = null
+        val rec = recognizer ?: return
+        synchronized(users) {
+            recognizer = null
+            backend = null
+            if (users.containsKey(rec)) retired.add(rec) else rec.release()
+        }
+    }
+
+    /** Open [Transcriber]s per model, guarded by itself. */
+    private val users = HashMap<OnlineRecognizer, Int>()
+
+    /** Unloaded models that are freed once their last [Transcriber] is released. */
+    private val retired = HashSet<OnlineRecognizer>()
+
+    internal fun retain(rec: OnlineRecognizer) = synchronized(users) {
+        check(rec === recognizer) { "The voice model was unloaded" }
+        users[rec] = (users[rec] ?: 0) + 1
+    }
+
+    internal fun releaseUse(rec: OnlineRecognizer) = synchronized(users) {
+        val n = (users[rec] ?: return@synchronized) - 1
+        if (n > 0) {
+            users[rec] = n
+        } else {
+            users.remove(rec)
+            if (retired.remove(rec)) rec.release()
+        }
     }
 
     private fun loadNpu(ctx: Context): OnlineRecognizer {
@@ -147,16 +176,32 @@ object Engine {
             provider = "qnn",
             modelType = "nemo_transducer",
         )
-        return OnlineRecognizer(config = config(model)).also { Prefs.setNpuLoading(ctx, false) }
+        val rec = OnlineRecognizer(config = config(model))
+        // A broken setup can also abort on the first decode rather than at load, so run one
+        // before clearing the flag; otherwise every start would crash the app again.
+        try {
+            val probe = rec.createStream("")
+            probe.acceptWaveform(FloatArray(SAMPLE_RATE), SAMPLE_RATE)
+            probe.inputFinished()
+            while (rec.isReady(probe)) rec.decode(probe)
+            probe.release()
+        } catch (e: Exception) {
+            rec.release()
+            throw e
+        }
+        Prefs.setNpuLoading(ctx, false)
+        return rec
     }
 
     private fun cpuModel(ctx: Context): OnlineModelConfig {
         val dir = modelDir(ctx)
+        fun path(prefix: String) =
+            (find(dir, prefix) ?: error("The voice model's $prefix file is missing")).absolutePath
         return OnlineModelConfig(
             transducer = OnlineTransducerModelConfig(
-                encoder = find(dir, "encoder")!!.absolutePath,
-                decoder = find(dir, "decoder")!!.absolutePath,
-                joiner = find(dir, "joiner")!!.absolutePath,
+                encoder = path("encoder"),
+                decoder = path("decoder"),
+                joiner = path("joiner"),
             ),
             tokens = File(dir, "tokens.txt").absolutePath,
             numThreads = 4,
@@ -179,18 +224,35 @@ object Engine {
     )
 }
 
-/** One dictation: feed audio in, read the running transcript out. */
+/**
+ * One dictation: feed audio in, read the running transcript out. Call [finish] or [release]
+ * when done; until then the model it runs on stays in memory. Calls after that are ignored
+ * (the native stream is gone), and all calls are serialised, so it is safe to release from
+ * another thread.
+ */
 class Transcriber(private val rec: OnlineRecognizer, language: String? = null) {
-    private val stream: OnlineStream = rec.createStream("").apply {
-        if (language != null) setOption("language", language)
+    init {
+        Engine.retain(rec)
+    }
+
+    private val stream: OnlineStream = try {
+        rec.createStream("").apply {
+            if (language != null) setOption("language", language)
+        }
+    } catch (e: Throwable) {
+        Engine.releaseUse(rec)
+        throw e
     }
     private val committed = StringBuilder()
+    private var released = false
 
     private fun join(tail: String) =
         listOf(committed.toString(), tail).filter { it.isNotBlank() }.joinToString(" ")
 
     /** Adds audio and returns the transcript so far. */
+    @Synchronized
     fun accept(samples: FloatArray): String {
+        if (released) return committed.toString()
         stream.acceptWaveform(samples, SAMPLE_RATE)
         while (rec.isReady(stream)) rec.decode(stream)
         val partial = rec.getResult(stream).text.trim()
@@ -206,15 +268,25 @@ class Transcriber(private val rec: OnlineRecognizer, language: String? = null) {
     }
 
     /** Flushes the last chunk and returns the final transcript. */
+    @Synchronized
     fun finish(): String {
-        // Silence padding lets the streaming encoder emit the final words.
-        stream.acceptWaveform(FloatArray(SAMPLE_RATE * 8 / 10), SAMPLE_RATE)
-        stream.inputFinished()
-        while (rec.isReady(stream)) rec.decode(stream)
-        val text = join(rec.getResult(stream).text.trim())
-        stream.release()
-        return text
+        if (released) return committed.toString()
+        try {
+            // Silence padding lets the streaming encoder emit the final words.
+            stream.acceptWaveform(FloatArray(SAMPLE_RATE * 8 / 10), SAMPLE_RATE)
+            stream.inputFinished()
+            while (rec.isReady(stream)) rec.decode(stream)
+            return join(rec.getResult(stream).text.trim())
+        } finally {
+            release()
+        }
     }
 
-    fun release() = stream.release()
+    @Synchronized
+    fun release() {
+        if (released) return
+        released = true
+        stream.release()
+        Engine.releaseUse(rec)
+    }
 }

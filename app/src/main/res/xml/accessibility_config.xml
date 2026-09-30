@@ -1,8 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Kept to the minimum the bubble needs:
+  - typeWindowsChanged: the keyboard opening, closing or resizing (needs
+    flagRetrieveInteractiveWindows, which is also what lets Murmur see the keyboard window).
+  - typeViewFocused / typeViewClicked: a text field was tapped, so the bubble can appear
+    together with the keyboard.
+  - canRetrieveWindowContent: to find the focused text field and type into it.
+  No view IDs, no window-state events, no key events, no gestures.
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeViewFocused|typeViewClicked|typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityEventTypes="typeViewFocused|typeViewClicked|typeWindowsChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_description"
     android:isAccessibilityTool="false"

@@ -58,20 +58,5 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_config" />
         </service>
-
-        <!-- Voice-only keyboard: dictation without the accessibility service. Other keyboards
-             switch to it from their mic key; its visible window is what allows recording. -->
-        <service
-            android:name=".VoiceKeyboard"
-            android:exported="true"
-            android:label="@string/ime_name"
-            android:permission="android.permission.BIND_INPUT_METHOD">
-            <intent-filter>
-                <action android:name="android.view.InputMethod" />
-            </intent-filter>
-            <meta-data
-                android:name="android.view.im"
-                android:resource="@xml/method" />
-        </service>
     </application>
 </manifest>

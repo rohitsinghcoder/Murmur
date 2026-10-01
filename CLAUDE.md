@@ -42,12 +42,6 @@ phone (OnePlus 15, Termux).
 - `DictationService.kt` — microphone foreground service: records, transcribes, saves to history.
 - `BubbleService.kt` — accessibility service: shows the bubble above the keyboard, finds the
   focused field across windows and inserts text (SET_TEXT, falling back to paste).
-- `VoiceKeyboard.kt` — voice-only input method (subtype mode `voice`, `res/xml/method.xml`):
-  the no-accessibility path. Keyboards like HeliBoard switch to it from their mic key; it
-  auto-listens, commits via `InputConnection`, then switches back. Its visible window allows
-  recording, so it needs neither `DictationService` nor Start; it loads `Engine` itself.
-- `Recorder.kt` — `VoiceRecorder` (mic → `Transcriber` pipeline used by the keyboard) and
-  `MicGate`, which keeps the bubble and the keyboard from recording at the same time.
 - `Bubble.kt` — bubble/pill UI. The overlay window has fixed sizes; only Compose animates.
 - `MainActivity.kt`, `HistoryScreen.kt` — setup checklist, try-it box, speed test, history.
 - `Cleanup.kt`, `Numbers.kt` — filler-word removal and spoken numbers to digits, applied to
@@ -58,4 +52,4 @@ phone (OnePlus 15, Termux).
 ## Device quirks (OnePlus)
 - adb `pm grant` and `screenrecord` are blocked; `run-as` works for debug builds.
 - Android 14+: accessibility services and overlays are NOT exempt from the background mic
-  restriction — hence the "Start" step (bubble only; the voice keyboard doesn't need it).
+  restriction — hence the "Start" step.

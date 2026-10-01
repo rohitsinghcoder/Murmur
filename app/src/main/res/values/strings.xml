@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="accessibility_description">Shows the Murmur bubble above your keyboard and types what you say into the text field you are using. Speech is processed entirely on your phone. Murmur never types into password fields and does not read or store other screen content.</string>
-    <string name="ime_name">Murmur voice keyboard</string>
-    <string name="ime_subtype_label">English (voice)</string>
 </resources>

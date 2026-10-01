@@ -16,7 +16,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
-import android.provider.Settings
 import android.animation.ValueAnimator
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -145,7 +144,7 @@ class BubbleService : AccessibilityService() {
         // Don't wait for the keyboard window: show at its last known position so
         // the bubble arrives together with the keyboard.
         val pkg = event.packageName?.toString()
-        if (!visible.value && !ownKeyboardShown()) (imeTopByApp[pkg] ?: lastImeTop)?.let { show(it) }
+        if (!visible.value) (imeTopByApp[pkg] ?: lastImeTop)?.let { show(it) }
         main.removeCallbacks(confirmKeyboard)
         main.postDelayed(confirmKeyboard, 800)
     }
@@ -191,7 +190,7 @@ class BubbleService : AccessibilityService() {
             null
         }
         val busy = Murmur.state.value.phase.isActive
-        if (ime == null || (!busy && ownKeyboardShown())) {
+        if (ime == null) {
             if (!busy) hide()
             return
         }
@@ -204,12 +203,6 @@ class BubbleService : AccessibilityService() {
         // Keyboards differ per app (toolbars, suggestion strips); remember each one.
         lastFocused?.packageName?.toString()?.let { imeTopByApp[it] = top }
         if (!busy && lastFocused?.isPassword == true) hide() else show(top)
-    }
-
-    /** Murmur's own voice keyboard is up; it has its own controls, so no bubble on top. */
-    private fun ownKeyboardShown(): Boolean {
-        val ime = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
-        return ime?.startsWith("$packageName/") == true
     }
 
     /**

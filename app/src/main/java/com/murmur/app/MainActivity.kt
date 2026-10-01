@@ -8,7 +8,6 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
-import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -136,11 +135,6 @@ private fun bubbleEnabled(ctx: Context): Boolean {
     return enabled.split(':').any { it.equals(full, true) || it.equals(short, true) }
 }
 
-/** The Murmur voice keyboard is turned on under Settings → Keyboards. */
-private fun keyboardEnabled(ctx: Context): Boolean =
-    ctx.getSystemService(InputMethodManager::class.java).enabledInputMethodList
-        .any { it.packageName == ctx.packageName }
-
 @Composable
 private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) -> Unit) {
     val ctx = LocalContext.current
@@ -166,7 +160,6 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
     val modelInstalled = remember(resumeTick) { Engine.isModelInstalled(ctx) }
     val npuInstalled = remember(resumeTick) { Engine.isNpuInstalled(ctx) }
     val bubbleOn = remember(resumeTick) { bubbleEnabled(ctx) }
-    val keyboardOn = remember(resumeTick) { keyboardEnabled(ctx) }
     val batteryFree = remember(resumeTick) {
         ctx.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
     }
@@ -225,18 +218,8 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
                             action = null,
                         ) {}
                         SetupRow(
-                            "Enable Murmur keyboard",
-                            "Dictate from your keyboard's mic key. Needs no accessibility, " +
-                                "so it works alongside banking apps",
-                            done = keyboardOn,
-                            action = "Turn on",
-                        ) {
-                            ctx.startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
-                        }
-                        SetupRow(
-                            "Bubble in other apps (optional)",
-                            "Uses accessibility to type into any field. Some banking apps " +
-                                "won't run while it's on",
+                            "Bubble in other apps",
+                            "Accessibility lets Murmur type into any text field",
                             done = bubbleOn,
                             action = "Turn on",
                         ) {

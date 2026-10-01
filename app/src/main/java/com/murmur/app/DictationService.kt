@@ -149,8 +149,6 @@ class DictationService : Service() {
      */
     fun listen(appPackage: String? = null, onText: (String) -> Unit): Boolean {
         if (destroyed || Murmur.state.value.phase != Phase.Ready) return false
-        // The voice keyboard may be using the microphone and the model right now.
-        if (!MicGate.acquire(this)) return false
         recording = true
         cancelled = false
         Murmur.update { it.copy(phase = Phase.Listening, partial = "", levels = emptyList(), error = null) }
@@ -163,8 +161,6 @@ class DictationService : Service() {
                 Murmur.update {
                     it.copy(phase = idle, partial = "", levels = emptyList(), error = "Dictation failed: ${e.message}")
                 }
-            } finally {
-                MicGate.release(this@DictationService)
             }
         }
         return true

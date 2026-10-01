@@ -5,9 +5,6 @@ speak, tap again, and your words are typed into the text field. Speech recogniti
 entirely on the phone. No internet, no account, nothing leaves the device.
 
 - Floating bubble above the keyboard (Wispr Flow style), draggable
-- Or the **Murmur voice keyboard**: switch to it from your keyboard's mic key. It needs no
-  accessibility service, so it works on phones with banking apps that refuse to run while one
-  is on
 - Live transcript while you speak, with punctuation and capitals
 - Removes "um", "uh" and similar filler words
 - Writes numbers the way you'd type them: "twenty twenty five" → 2025, "fifty percent" → 50%,
@@ -79,18 +76,15 @@ only works for the debug build installed in step 2.
 Open **Murmur** and follow the checklist on the main screen:
 
 1. **Microphone:** allow it.
-2. **Murmur keyboard:** turn on *Murmur voice keyboard* under Settings → Keyboards. Keyboards
-   such as HeliBoard, FUTO Keyboard and OpenBoard switch to it from their mic key (you can also
-   pick it from the keyboard switcher). It starts listening right away; tap stop and your words
-   are typed and your normal keyboard comes back. No Start button or accessibility needed.
-3. **Bubble (optional):** turn on Murmur under Settings → Accessibility. Android only lets an
+2. **Bubble:** turn on Murmur under Settings → Accessibility. Android only lets an
    accessibility service see and fill text fields in other apps; that's what types your words.
-   Some banking apps refuse to run while any such service is on; use the keyboard instead.
-4. **Battery:** allow unrestricted battery use, so Android doesn't stop Murmur in the background.
-5. For the bubble, tap **Start**. The first start loads the model and takes a few seconds.
+   Some banking apps refuse to run while any such service is on.
+3. **Battery:** allow unrestricted battery use, so Android doesn't stop Murmur in the background.
+4. Tap **Start**. The first start loads the model and takes a few seconds.
 
 With the bubble on, tap into any text field: the bubble appears above the keyboard. Tap it,
-speak, and tap it again to type what you said. Drag the bubble to move it.
+speak, and tap it again to type what you said. Drag the bubble to move it, or drop it on the X
+at the bottom to close it until you next open Murmur.
 
 ## Good to know
 
@@ -124,8 +118,6 @@ Everything is in `app/src/main/java/com/murmur/app/`:
 | `Engine.kt` | Loads the speech model once; `Transcriber` streams audio in and text out |
 | `DictationService.kt` | Microphone foreground service: records, transcribes, saves to history |
 | `BubbleService.kt` | Accessibility service: shows the bubble and types text into the focused field |
-| `VoiceKeyboard.kt` | The voice keyboard (an input method; no accessibility needed) |
-| `Recorder.kt` | Microphone-to-text pipeline used by the keyboard; one dictation at a time |
 | `Bubble.kt` | The bubble and the listening pill |
 | `Cleanup.kt`, `Numbers.kt` | Filler-word removal and number formatting |
 | `MainActivity.kt`, `HistoryScreen.kt` | Setup checklist, try-it box, speed test, history |

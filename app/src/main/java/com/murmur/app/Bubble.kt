@@ -48,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -293,6 +294,38 @@ fun MurmurMark(color: Color, modifier: Modifier) {
                 strokeWidth = stroke,
                 cap = StrokeCap.Round,
             )
+        }
+    }
+}
+
+/** Size of the close target's window; the circle inside grows when the bubble is over it. */
+const val CLOSE_TARGET_DP = 112
+
+/** Drop zone at the bottom of the screen, shown while the bubble is dragged. */
+@Composable
+fun CloseTarget(visible: Boolean, armed: Boolean) {
+    val scale by animateFloatAsState(if (armed) 1.25f else 1f, tween(140), label = "armed")
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        AnimatedVisibility(
+            visible,
+            enter = fadeIn(tween(140)) + scaleIn(tween(180), initialScale = 0.6f),
+            exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.8f),
+        ) {
+            Box(
+                Modifier
+                    .size(56.dp)
+                    .graphicsLayer { scaleX = scale; scaleY = scale }
+                    .shadow(6.dp, CircleShape)
+                    .clip(CircleShape)
+                    .background(if (armed) Color.White else Ink)
+                    .border(1.dp, Edge, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Rounded.Close, "Close bubble",
+                    tint = if (armed) Ink else Color.White, modifier = Modifier.size(24.dp),
+                )
+            }
         }
     }
 }

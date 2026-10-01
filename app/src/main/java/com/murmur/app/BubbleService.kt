@@ -17,7 +17,9 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
 import android.provider.Settings
+import android.animation.ValueAnimator
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -108,6 +110,9 @@ class BubbleService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
+        // Moving the overlay fires window changes; acting on them mid-drag snapped the
+        // bubble back to its old spot. Everything is re-checked when the drag ends.
+        if (dragging) return
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_FOCUSED, AccessibilityEvent.TYPE_VIEW_CLICKED -> onFieldEvent(event)
             // Window changes come in bursts (keyboard animating in, pop-ups): handle once per burst.
@@ -165,8 +170,11 @@ class BubbleService : AccessibilityService() {
 
     override fun onDestroy() {
         main.removeCallbacksAndMessages(null)
+        settle?.cancel()
         root?.let { runCatching { wm.removeViewImmediate(it) } }
+        closeRoot?.let { runCatching { wm.removeViewImmediate(it) } }
         root = null
+        closeRoot = null
         params = null
         target = null
         lastFocused = null
@@ -176,6 +184,7 @@ class BubbleService : AccessibilityService() {
     }
 
     private fun refresh() {
+        if (dragging) return
         val ime = try {
             windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
         } catch (_: Exception) {
@@ -230,12 +239,14 @@ class BubbleService : AccessibilityService() {
     private val reanchor = Runnable {
         val lp = params ?: return@Runnable
         val y = pendingY ?: return@Runnable
+        if (dragging) return@Runnable
         lp.y = y
         updateLayout(lp)
     }
     private var pendingY: Int? = null
 
     private fun show(imeTop: Int) {
+        if (!visible.value && Prefs.bubbleClosed(this)) return
         val lp = params ?: createView(imeTop)
         if (!visible.value) {
             main.removeCallbacks(reanchor)
@@ -292,7 +303,7 @@ class BubbleService : AccessibilityService() {
                     onCancel = { DictationService.instance?.cancel() },
                     onDragStart = ::dragStart,
                     onDrag = ::drag,
-                    onDragEnd = ::savePosition,
+                    onDragEnd = ::dragEnd,
                 )
             }
         }
@@ -301,6 +312,7 @@ class BubbleService : AccessibilityService() {
             setViewTreeSavedStateRegistryOwner(owner)
             addView(compose)
         }
+        createCloseTarget()
         wm.addView(frame, lp)
         root = frame
         params = lp
@@ -381,36 +393,147 @@ class BubbleService : AccessibilityService() {
 
     // Dragging follows the finger's screen position. Compose's deltas are relative to the
     // window, which is itself moving, so using them made the bubble lag and stutter.
+    private var dragging = false
     private var dragFromX = 0f
     private var dragFromY = 0f
     private var dragBaseX = 0
     private var dragBaseY = 0
+    private var settle: ValueAnimator? = null
+
+    /** Drop zone at the bottom of the screen; dropping the bubble there closes it. */
+    private var closeRoot: ComposeView? = null
+    private val closeShown = mutableStateOf(false)
+    private val closeArmed = mutableStateOf(false)
 
     private fun dragStart() {
         val frame = root ?: return
         val lp = params ?: return
         main.removeCallbacks(reanchor)
+        settle?.cancel()
+        dragging = true
         dragFromX = frame.rawX
         dragFromY = frame.rawY
         dragBaseX = baseX
         dragBaseY = lp.y
+        closeArmed.value = false
+        showCloseTarget()
     }
 
     private fun drag() {
         val frame = root ?: return
         val lp = params ?: return
+        if (!dragging) return
+        val screen = screenSize()
+        // Free movement anywhere on screen while dragging (it settles above the keys on
+        // release); clamping to the keyboard here is what made it stick and jump.
         baseX = dragBaseX - (frame.rawX - dragFromX).roundToInt() // gravity END: x grows to the left
-        val maxY = lastImeTop?.let { aboveKeys(it) } ?: (screenSize().y - lp.height)
-        lp.y = (dragBaseY + (frame.rawY - dragFromY).roundToInt()).coerceIn(0, maxOf(0, maxY))
+        lp.y = (dragBaseY + (frame.rawY - dragFromY).roundToInt()).coerceIn(0, maxOf(0, screen.y - lp.height))
         placeX(lp)
+
+        val (cx, cy) = closeCenter()
+        val armed = kotlin.math.hypot(frame.rawX - cx, frame.rawY - cy) < dp(72)
+        if (armed != closeArmed.value) {
+            closeArmed.value = armed
+            if (armed) frame.performHapticFeedback(
+                if (Build.VERSION.SDK_INT >= 34) HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE
+                else HapticFeedbackConstants.VIRTUAL_KEY
+            )
+        }
+        if (armed) {
+            // Snap onto the target so it's clear letting go will close it.
+            lp.x = (screen.x - cx - lp.width / 2f).roundToInt()
+            lp.y = (cy - lp.height / 2f).roundToInt()
+        }
         updateLayout(lp)
     }
 
-    /** Saved once per drag rather than on every move event. */
-    private fun savePosition() {
+    private fun dragEnd() {
+        if (!dragging) return
+        dragging = false
         val lp = params ?: return
+        val close = closeArmed.value
+        closeArmed.value = false
+        closeShown.value = false
+        if (close) {
+            closeBubble(lp)
+            return
+        }
+        // Settle above the keys if it was dropped on the keyboard.
+        val maxY = lastImeTop?.let { aboveKeys(it) } ?: (screenSize().y - lp.height)
+        val target = lp.y.coerceIn(0, maxOf(0, maxY))
         Prefs.setBubbleX(this, baseX)
-        Prefs.setBubbleY(this, lp.y)
+        Prefs.setBubbleY(this, target)
+        if (target != lp.y) {
+            settle = ValueAnimator.ofInt(lp.y, target).apply {
+                duration = 180
+                addUpdateListener {
+                    lp.y = it.animatedValue as Int
+                    updateLayout(lp)
+                }
+                start()
+            }
+        }
+        main.post(refreshNow)
+    }
+
+    /** Hides the bubble until Murmur is opened again; it returns to where it was before the drag. */
+    private fun closeBubble(lp: WindowManager.LayoutParams) {
+        if (Murmur.state.value.phase.isActive) DictationService.instance?.cancel()
+        Prefs.setBubbleClosed(this, true)
+        hide()
+        baseX = dragBaseX
+        lp.y = dragBaseY
+        placeX(lp)
+        main.postDelayed({ updateLayout(lp) }, 150) // after the fade-out
+        Toast.makeText(this, "Bubble closed. Open Murmur to bring it back.", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Center of the close target, in screen px. */
+    private fun closeCenter(): Pair<Float, Float> {
+        val screen = screenSize()
+        return screen.x / 2f to (closeTop(screen.y) + dp(CLOSE_TARGET_DP) / 2f)
+    }
+
+    /** Clear of the gesture bar at the bottom. */
+    private fun closeTop(screenH: Int) = screenH - dp(CLOSE_TARGET_DP) - dp(48)
+
+    private fun showCloseTarget() {
+        val view = closeRoot ?: return
+        // Position again in case the screen rotated since the last drag.
+        runCatching { wm.updateViewLayout(view, closeParams()) }
+        closeShown.value = true
+    }
+
+    /**
+     * Created (invisible) just before the bubble's window: windows of one type stack in the
+     * order they're added, so the bubble is drawn on top of the target when dropped onto it.
+     */
+    private fun createCloseTarget() {
+        if (closeRoot != null) return
+        val compose = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(owner)
+            setViewTreeSavedStateRegistryOwner(owner)
+            setContent { CloseTarget(closeShown.value, closeArmed.value) }
+        }
+        runCatching { wm.addView(compose, closeParams()) }.onSuccess { closeRoot = compose }
+    }
+
+    private fun closeParams(): WindowManager.LayoutParams {
+        val screen = screenSize()
+        val size = dp(CLOSE_TARGET_DP)
+        return WindowManager.LayoutParams(
+            size, size,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = (screen.x - size) / 2
+            y = closeTop(screen.y)
+        }
     }
 
     private fun onTap() {

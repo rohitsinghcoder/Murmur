@@ -122,6 +122,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         resumeTick.intValue++
+        // Opening Murmur brings back a bubble the user closed.
+        Prefs.setBubbleClosed(this, false)
     }
 }
 

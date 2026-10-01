@@ -49,6 +49,12 @@ object Prefs {
     fun setBubbleY(ctx: Context, y: Int) =
         prefs(ctx).edit().putInt("bubble_y", y.coerceAtLeast(0)).remove("bubble_lift").apply()
 
+    /** The user dragged the bubble onto the close target; it stays away until Murmur is opened. */
+    fun bubbleClosed(ctx: Context) = prefs(ctx).getBoolean("bubble_closed", false)
+
+    fun setBubbleClosed(ctx: Context, closed: Boolean) =
+        prefs(ctx).edit().putBoolean("bubble_closed", closed).apply()
+
     /** Run the speech model on the NPU when the NPU model is installed. */
     fun useNpu(ctx: Context) = prefs(ctx).getBoolean("use_npu", true)
 

@@ -39,6 +39,7 @@ class InsertionTest {
         assertEquals("the big", fit("I saw ", "The big.", " dog"))
         assertEquals("Hello.", fit("", "Hello.", " World"))
         assertEquals("Wait...", fit("", "Wait...", " and see"))
+        assertEquals("", fit("Hi ", ".", "there"))
     }
 
     @Test

@@ -62,6 +62,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.role
@@ -159,31 +160,44 @@ fun Bubble(
     // would swallow taps anyway, so it may as well make the bubble easier to hit.
     val touches = remember { MutableInteractionSource() }
 
+    // While the pill shrinks back, the window is still wide: a tap beside the shrinking pill
+    // is meant for the app underneath, not a new dictation.
+    val collapsing = !active && width > BUBBLE_HEIGHT_DP.dp
     Box(
         Modifier
             .fillMaxSize()
-            .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { onDragStart() },
-                    onDragEnd = onDragEnd,
-                    onDragCancel = onDragEnd,
-                ) { change, _ ->
-                    change.consume()
-                    onDrag()
-                }
-            }
-            .semantics {
-                contentDescription = label
-                role = Role.Button
-                if (!active) {
-                    // Dragging isn't possible with TalkBack; these do what dragging does.
-                    customActions = listOf(
-                        CustomAccessibilityAction("Move to the other side") { onSwitchSide(); true },
-                        CustomAccessibilityAction("Close bubble") { onClose(); true },
+            .then(
+                // A hidden bubble stays attached (for a quick return) but must not be found
+                // by TalkBack or take touches.
+                if (!visible) Modifier.clearAndSetSemantics {} else Modifier
+                    .pointerInput(Unit) {
+                        detectDragGestures(
+                            onDragStart = { onDragStart() },
+                            onDragEnd = onDragEnd,
+                            onDragCancel = onDragEnd,
+                        ) { change, _ ->
+                            change.consume()
+                            onDrag()
+                        }
+                    }
+                    .semantics {
+                        contentDescription = label
+                        role = Role.Button
+                        if (!active) {
+                            // Dragging isn't possible with TalkBack; these do what dragging does.
+                            customActions = listOf(
+                                CustomAccessibilityAction("Move to the other side") { onSwitchSide(); true },
+                                CustomAccessibilityAction("Close bubble") { onClose(); true },
+                            )
+                        }
+                    }
+                    .clickable(
+                        interactionSource = touches,
+                        indication = null,
+                        enabled = !collapsing,
+                        onClick = onTap,
                     )
-                }
-            }
-            .clickable(interactionSource = touches, indication = null, onClick = onTap)
+            )
             .padding(BUBBLE_MARGIN_DP.dp),
         contentAlignment = side,
     ) {
@@ -200,7 +214,7 @@ fun Bubble(
                     .clip(shape)
                     .background(Ink)
                     .border(1.dp, Edge, shape)
-                    .indication(touches, ripple()),
+                    .indication(touches, ripple(color = Color.White)),
                 contentAlignment = side,
             ) {
                 if (pillAlpha > 0f) {

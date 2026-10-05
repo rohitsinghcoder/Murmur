@@ -46,6 +46,7 @@ object Insertion {
         // The sentence goes on after the cursor: the model's closing period doesn't belong.
         if (next != null && next.isLowerCase() && t.endsWith('.') && !t.endsWith("..")) {
             t = t.dropLast(1)
+            if (t.isEmpty()) return ""
         }
         val last = before.lastOrNull()
         val lead = last != null && !last.isWhitespace() && last !in NO_SPACE_AFTER && t[0] !in NO_SPACE_BEFORE

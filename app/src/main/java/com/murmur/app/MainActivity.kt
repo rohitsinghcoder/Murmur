@@ -240,11 +240,22 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
         ctx.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
     }
     var micNow by remember { mutableStateOf(false) }
-    // Once the user has said no for good, Android stops showing the dialog: send them to Settings.
-    var micAsked by rememberSaveable { mutableStateOf(false) }
+    // Once the user has said no for good, Android stops showing the dialog: send them to
+    // Settings. That shows after the fact: a refusal after which Android no longer offers an
+    // explanation, when it did before (or a second refusal in a row).
+    var micBlocked by rememberSaveable { mutableStateOf(false) }
+    var micRefusals by rememberSaveable { mutableIntStateOf(0) }
+    var rationaleBefore by remember { mutableStateOf(false) }
     val permissions = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { result -> micNow = result[Manifest.permission.RECORD_AUDIO] == true }
+    ) { result ->
+        micNow = result[Manifest.permission.RECORD_AUDIO] == true
+        if (!micNow) {
+            micRefusals++
+            val rationale = (ctx as Activity).shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)
+            if (!rationale && (rationaleBefore || micRefusals >= 2)) micBlocked = true
+        }
+    }
     val hasMic = micGranted || micNow
     // Android 13+ hides the notification (and its Turn off button) without this permission.
     // Murmur works without it, so start either way.
@@ -310,8 +321,7 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
                             done = hasMic,
                             action = "Allow",
                         ) {
-                            val activity = ctx as Activity
-                            if (micAsked && !activity.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
+                            if (micBlocked) {
                                 openFirst(
                                     ctx,
                                     listOf(
@@ -322,7 +332,8 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
                                     ),
                                 )
                             } else {
-                                micAsked = true
+                                rationaleBefore = (ctx as Activity)
+                                    .shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)
                                 permissions.launch(
                                     if (Build.VERSION.SDK_INT >= 33) {
                                         arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)

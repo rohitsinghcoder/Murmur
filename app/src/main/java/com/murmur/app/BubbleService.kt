@@ -118,11 +118,14 @@ class BubbleService : AccessibilityService() {
                     setExpanded(true)
                 } else {
                     if (wasActive) onDictationEnded()
+                }
+                // Before the delay: a new dictation cancels this block while it waits.
+                wasActive = active
+                if (!active) {
                     // Let the pill finish shrinking before the window gets small again.
                     delay(COLLAPSE_MS + 80)
                     if (!Murmur.state.value.phase.isActive) setExpanded(false)
                 }
-                wasActive = active
                 refresh()
             }
         }
@@ -693,8 +696,8 @@ class BubbleService : AccessibilityService() {
         // text; SET_TEXT would then wipe what's hidden, so only a paste is safe. So does an
         // unknown cursor in a field with text (common in web pages): SET_TEXT would put the
         // dictation at the end rather than where the user is typing.
-        val textKnown = current.isEmpty() ||
-            (selStart in 0..current.length && selEnd in 0..current.length)
+        val textKnown = (selStart in 0..current.length && selEnd in 0..current.length) ||
+            (current.isEmpty() && selStart < 0 && selEnd < 0)
         val start: Int
         val end: Int
         if (selStart < 0 || selEnd < 0 || !textKnown) {

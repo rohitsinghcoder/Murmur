@@ -92,6 +92,9 @@ class DictationService : Service() {
     /** Set in [onDestroy]: work still finishing on the worker must not report Ready. */
     @Volatile private var destroyed = false
 
+    /** This instance has a model load queued or running. */
+    @Volatile private var loading = false
+
     /** The phase to return to after a dictation or load. */
     private val idle get() = if (destroyed) Phase.Off else Phase.Ready
 
@@ -129,8 +132,8 @@ class DictationService : Service() {
         }
 
         val phase = Murmur.state.value.phase
-        if (phase.isActive || phase == Phase.Busy) {
-            // Started again mid-dictation: leave it running.
+        if (phase.isActive || phase == Phase.Busy || loading) {
+            // Started again mid-dictation, or while this instance loads: leave it running.
         } else if (phase != Phase.Ready || !Engine.isLoaded) {
             // Queued behind anything a stopped instance left on the worker (its unload, or a
             // load still running), so the model is loaded and warm when this reports Ready.
@@ -141,33 +144,42 @@ class DictationService : Service() {
     }
 
     private fun loadModel() {
+        loading = true
         Murmur.update { it.copy(phase = Phase.Loading, error = null) }
         worker.execute {
-            if (destroyed) return@execute
-            val t0 = SystemClock.elapsedRealtime()
             try {
-                val wasLoaded = Engine.isLoaded
-                // A throwaway dictation warms the model up, so the first real one is quick.
-                Engine.transcriber(this).run {
-                    try {
-                        accept(FloatArray(SAMPLE_RATE))
-                        finish()
-                    } finally {
-                        release()
-                    }
-                }
-                val ms = SystemClock.elapsedRealtime() - t0
-                report {
-                    it.copy(
-                        phase = idle,
-                        loadMs = if (wasLoaded) it.loadMs ?: ms else ms,
-                        backend = Engine.backend,
-                    )
-                }
-            } catch (e: Throwable) {
-                report { it.copy(phase = Phase.Off, error = "Couldn't load the voice model: ${e.message}") }
-                main.post { stopSelf() }
+                warmUp()
+            } finally {
+                loading = false
             }
+        }
+    }
+
+    /** Loads the model if needed and runs a throwaway dictation, so the first real one is quick. */
+    private fun warmUp() {
+        if (destroyed) return
+        val t0 = SystemClock.elapsedRealtime()
+        try {
+            val wasLoaded = Engine.isLoaded
+            Engine.transcriber(this).run {
+                try {
+                    accept(FloatArray(SAMPLE_RATE))
+                    finish()
+                } finally {
+                    release()
+                }
+            }
+            val ms = SystemClock.elapsedRealtime() - t0
+            report {
+                it.copy(
+                    phase = idle,
+                    loadMs = if (wasLoaded) it.loadMs ?: ms else ms,
+                    backend = Engine.backend,
+                )
+            }
+        } catch (e: Throwable) {
+            report { it.copy(phase = Phase.Off, error = "Couldn't load the voice model: ${e.message}") }
+            main.post { stopSelf() }
         }
     }
 
@@ -307,7 +319,7 @@ class DictationService : Service() {
                             if (text != lastText) {
                                 lastText = text
                                 lastChange = SystemClock.elapsedRealtime()
-                                Murmur.update { it.copy(partial = text) }
+                                report { it.copy(partial = text) }
                             }
                         }
                     }
@@ -324,7 +336,7 @@ class DictationService : Service() {
                 report { it.copy(phase = idle, partial = "", levels = emptyList()) }
                 return
             }
-            Murmur.update { it.copy(phase = Phase.Finishing) }
+            report { it.copy(phase = Phase.Finishing) }
             val t0 = SystemClock.elapsedRealtime()
             val text = Cleanup.tidy(t.finish(), english)
             val latency = SystemClock.elapsedRealtime() - t0

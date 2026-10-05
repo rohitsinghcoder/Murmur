@@ -2,6 +2,10 @@
 build/
 local.properties
 build.log
+.kotlin/
+.idea/
+*.iml
+.cxx/
 app/libs/*.aar
 
 # Downloaded by scripts/fetch-deps.sh

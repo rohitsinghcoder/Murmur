@@ -5,7 +5,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 
 enum class Phase {
-    Off, Loading, Ready, Listening, Finishing;
+    Off, Loading, Ready,
+
+    /** The model is in use by the speed test; dictation waits until it's done. */
+    Busy,
+    Listening, Finishing;
 
     /** A dictation is in progress (the bubble shows the wide pill). */
     val isActive get() = this == Listening || this == Finishing

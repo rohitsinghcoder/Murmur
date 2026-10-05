@@ -17,6 +17,9 @@ cpu="models/$MODEL"
 [ -f "$cpu/tokens.txt" ] || cpu=""
 [ -n "$npu$cpu" ] || { echo "Model not found; run scripts/fetch-deps.sh first." >&2; exit 1; }
 
+# The running app may have the old model open; replacing it underneath could crash it.
+adb shell am force-stop "$APP"
+
 # Files adb pushes elsewhere (e.g. Android/data) are unreadable to the app, so push to a temp
 # folder and copy them in as the app itself.
 copy_in() { # source folder, app folder, files...

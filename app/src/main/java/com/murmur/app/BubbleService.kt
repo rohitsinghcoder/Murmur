@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
 import android.animation.ValueAnimator
+import android.text.InputType
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -42,6 +43,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -86,6 +88,15 @@ class BubbleService : AccessibilityService() {
     /** Bumped after a successful insert so the bubble can flash a check mark. */
     private val insertedTick = mutableIntStateOf(0)
 
+    /** Bumped when a dictation ends with an error, so the bubble can flash a warning. */
+    private val errorTick = mutableIntStateOf(0)
+
+    /** Set in [onDestroy]: a dictation finishing afterwards must not type or toast. */
+    private var destroyed = false
+
+    /** Screen size the keyboard positions were measured for. */
+    private var configKey: Triple<Int, Int, Int>? = null
+
     private val density get() = resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).roundToInt()
 
@@ -93,19 +104,41 @@ class BubbleService : AccessibilityService() {
         wm = getSystemService(WindowManager::class.java)
         baseX = Prefs.bubbleX(this) ?: dp(12)
         owner.start()
+        configKey = configKey(resources.configuration)
         // Keep the bubble up while dictation finishes, even if the keyboard closes.
         scope.launch {
-            Murmur.state.map { it.phase.isActive }.distinctUntilChanged().collect { active ->
+            var wasActive = false
+            // collectLatest: a dictation started again while the pill is closing must not
+            // have the window shrunk under it once the delay below runs out.
+            Murmur.state.map { it.phase.isActive }.distinctUntilChanged().collectLatest { active ->
+                // A long dictation must not lock the phone before its text is typed.
+                root?.keepScreenOn = active
                 if (active) {
+                    if (!wasActive) haptic(HapticFeedbackConstants.CONTEXT_CLICK)
                     setExpanded(true)
                 } else {
+                    if (wasActive) onDictationEnded()
                     // Let the pill finish shrinking before the window gets small again.
                     delay(COLLAPSE_MS + 80)
                     if (!Murmur.state.value.phase.isActive) setExpanded(false)
                 }
+                wasActive = active
                 refresh()
             }
         }
+    }
+
+    /** Says why a dictation typed nothing: the pill closes either way. */
+    private fun onDictationEnded() {
+        val error = Murmur.state.value.error ?: return
+        if (!visible.value) return
+        errorTick.intValue++
+        haptic(if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.LONG_PRESS)
+        Toast.makeText(this, error, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun haptic(type: Int) {
+        root?.performHapticFeedback(type)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -114,8 +147,12 @@ class BubbleService : AccessibilityService() {
         if (dragging) return
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_FOCUSED, AccessibilityEvent.TYPE_VIEW_CLICKED -> onFieldEvent(event)
-            // Window changes come in bursts (keyboard animating in, pop-ups): handle once per burst.
             else -> {
+                // Most window changes are titles, layers or child windows of the app, none of
+                // which move or show the keyboard; each refresh is a call into the system.
+                val changes = event.windowChanges
+                if (changes != 0 && changes and WINDOW_CHANGES == 0) return
+                // Window changes come in bursts (keyboard animating in, pop-ups): handle once per burst.
                 main.removeCallbacks(refreshNow)
                 main.post(refreshNow)
             }
@@ -133,7 +170,7 @@ class BubbleService : AccessibilityService() {
             event.className?.contains("EditText") != true
         ) return
         val field = event.source?.takeIf { it.isEditable } ?: return
-        if (event.isPassword || field.isPassword) {
+        if (event.isPassword || isPassword(field)) {
             // Never offer dictation into a password field.
             lastFocused = null
             main.removeCallbacks(confirmKeyboard)
@@ -158,16 +195,24 @@ class BubbleService : AccessibilityService() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        // Theme or font changes also land here; only a new screen size moves the keyboard.
+        val key = configKey(newConfig)
+        if (key == configKey) return
+        configKey = key
         // Keyboard positions from the old orientation would put the bubble in the wrong place.
         lastImeTop = null
         imeTopByApp.clear()
         val lp = params ?: return
+        if (!expanded) growRight.value = baseX + windowWidth(false) / 2 > screenSize().x / 2
         placeX(lp)
         lp.y = lp.y.coerceIn(0, maxOf(0, screenSize().y - lp.height))
         updateLayout(lp)
     }
 
+    private fun configKey(c: Configuration) = Triple(c.orientation, c.screenWidthDp, c.screenHeightDp)
+
     override fun onDestroy() {
+        destroyed = true
         main.removeCallbacksAndMessages(null)
         settle?.cancel()
         root?.let { runCatching { wm.removeViewImmediate(it) } }
@@ -202,7 +247,7 @@ class BubbleService : AccessibilityService() {
         lastImeTop = top
         // Keyboards differ per app (toolbars, suggestion strips); remember each one.
         lastFocused?.packageName?.toString()?.let { imeTopByApp[it] = top }
-        if (!busy && lastFocused?.isPassword == true) hide() else show(top)
+        if (!busy && lastFocused?.let { isPassword(it) } == true) hide() else show(top)
     }
 
     /**
@@ -292,11 +337,14 @@ class BubbleService : AccessibilityService() {
                     visible = visible.value,
                     growRight = growRight.value,
                     insertedTick = insertedTick.intValue,
+                    errorTick = errorTick.intValue,
                     onTap = ::onTap,
                     onCancel = { DictationService.instance?.cancel() },
                     onDragStart = ::dragStart,
                     onDrag = ::drag,
                     onDragEnd = ::dragEnd,
+                    onClose = { params?.let { closeBubble(it, restore = false) } },
+                    onSwitchSide = ::switchSide,
                 )
             }
         }
@@ -427,9 +475,12 @@ class BubbleService : AccessibilityService() {
         val armed = kotlin.math.hypot(frame.rawX - cx, frame.rawY - cy) < dp(72)
         if (armed != closeArmed.value) {
             closeArmed.value = armed
-            if (armed) frame.performHapticFeedback(
-                if (Build.VERSION.SDK_INT >= 34) HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE
-                else HapticFeedbackConstants.VIRTUAL_KEY
+            frame.performHapticFeedback(
+                when {
+                    Build.VERSION.SDK_INT < 34 -> if (armed) HapticFeedbackConstants.VIRTUAL_KEY else HapticFeedbackConstants.CLOCK_TICK
+                    armed -> HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE
+                    else -> HapticFeedbackConstants.GESTURE_THRESHOLD_DEACTIVATE
+                }
             )
         }
         if (armed) {
@@ -453,31 +504,69 @@ class BubbleService : AccessibilityService() {
         }
         // Settle above the keys if it was dropped on the keyboard.
         val maxY = lastImeTop?.let { aboveKeys(it) } ?: (screenSize().y - lp.height)
-        val target = lp.y.coerceIn(0, maxOf(0, maxY))
-        Prefs.setBubbleX(this, baseX)
-        Prefs.setBubbleY(this, target)
-        if (target != lp.y) {
-            settle = ValueAnimator.ofInt(lp.y, target).apply {
-                duration = 180
-                addUpdateListener {
-                    lp.y = it.animatedValue as Int
-                    updateLayout(lp)
-                }
-                start()
-            }
-        }
+        val targetY = lp.y.coerceIn(0, maxOf(0, maxY))
+        settleTo(roomForPill(baseX), targetY)
         main.post(refreshNow)
     }
 
-    /** Hides the bubble until Murmur is opened again; it returns to where it was before the drag. */
-    private fun closeBubble(lp: WindowManager.LayoutParams) {
+    /**
+     * Nearest spot where the pill can open without being pushed sideways: near the middle of
+     * the screen it doesn't fit on either side, and the bubble would jump when it opened.
+     */
+    private fun roomForPill(x: Int): Int {
+        val screenW = screenSize().x
+        val small = windowWidth(false)
+        val grow = windowWidth(true) - small
+        val right = x + small / 2 > screenW / 2 // gravity END: a large x is the left half
+        val fitted = if (right) maxOf(x, grow) else minOf(x, screenW - small - grow)
+        return fitted.coerceIn(0, maxOf(0, screenW - small))
+    }
+
+    /** Glides the bubble to [x], [y] and remembers the spot. */
+    private fun settleTo(x: Int, y: Int) {
+        val lp = params ?: return
+        Prefs.setBubbleX(this, x)
+        Prefs.setBubbleY(this, y)
+        val fromX = baseX
+        val fromY = lp.y
+        if (x == fromX && y == fromY) return
+        settle?.cancel()
+        settle = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 180
+            addUpdateListener {
+                val f = it.animatedValue as Float
+                baseX = fromX + ((x - fromX) * f).roundToInt()
+                lp.y = fromY + ((y - fromY) * f).roundToInt()
+                if (!expanded) growRight.value = baseX + windowWidth(false) / 2 > screenSize().x / 2
+                placeX(lp)
+                updateLayout(lp)
+            }
+            start()
+        }
+    }
+
+    /** Moves the bubble to the other side of the screen (for TalkBack, which can't drag). */
+    private fun switchSide() {
+        if (expanded) return
+        val screenW = screenSize().x
+        val small = windowWidth(false)
+        settleTo(roomForPill(screenW - small - baseX), params?.y ?: return)
+    }
+
+    /**
+     * Hides the bubble until Murmur is opened again. After a drag onto the close target it
+     * returns to where it was before the drag.
+     */
+    private fun closeBubble(lp: WindowManager.LayoutParams, restore: Boolean = true) {
         if (Murmur.state.value.phase.isActive) DictationService.instance?.cancel()
         Prefs.setBubbleClosed(this, true)
         hide()
-        baseX = dragBaseX
-        lp.y = dragBaseY
-        placeX(lp)
-        main.postDelayed({ updateLayout(lp) }, 150) // after the fade-out
+        if (restore) {
+            baseX = dragBaseX
+            lp.y = dragBaseY
+            placeX(lp)
+            main.postDelayed({ updateLayout(lp) }, 150) // after the fade-out
+        }
         Toast.makeText(this, "Bubble closed. Open Murmur to bring it back.", Toast.LENGTH_SHORT).show()
     }
 
@@ -534,19 +623,19 @@ class BubbleService : AccessibilityService() {
         when (Murmur.state.value.phase) {
             Phase.Off -> openApp("Open Murmur and tap Start to use the bubble")
             Phase.Loading, Phase.Finishing -> Unit
+            Phase.Busy -> Toast.makeText(this, "Murmur is running its speed test", Toast.LENGTH_SHORT).show()
             Phase.Ready -> {
                 if (service == null) return openApp("Open Murmur and tap Start to use the bubble")
                 val field = focusedEditable() ?: lastFocused
-                if (field?.isPassword == true) {
+                if (field != null && isPassword(field)) {
                     Toast.makeText(this, "Murmur doesn't type passwords", Toast.LENGTH_SHORT).show()
                     hide()
                     return
                 }
                 target = field
                 if (!service.listen(field?.packageName?.toString()) { text -> insert(text) }) {
-                    // The voice keyboard has the microphone right now.
                     target = null
-                    Toast.makeText(this, "The microphone is in use", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Murmur isn't ready yet", Toast.LENGTH_SHORT).show()
                 }
             }
             Phase.Listening -> service?.finish()
@@ -581,6 +670,8 @@ class BubbleService : AccessibilityService() {
 
     /** Inserts [text] at the cursor of the field that was focused when dictation started. */
     private fun insert(text: String) {
+        // Turned off mid-dictation; the text is still saved in history.
+        if (destroyed) return
         val node = target?.takeIf { it.refresh() && it.isEditable } ?: focusedEditable()
         target = null
         if (node == null) {
@@ -588,7 +679,7 @@ class BubbleService : AccessibilityService() {
             Toast.makeText(this, "No text field found — copied to clipboard", Toast.LENGTH_SHORT).show()
             return
         }
-        if (node.isPassword) {
+        if (isPassword(node)) {
             // Never type into (or leave dictation near) a password field.
             Toast.makeText(this, "Murmur doesn't type passwords", Toast.LENGTH_SHORT).show()
             return
@@ -599,8 +690,11 @@ class BubbleService : AccessibilityService() {
         val selStart = node.textSelectionStart
         val selEnd = node.textSelectionEnd
         // A cursor beyond the text we can see means the field doesn't expose all of its
-        // text; SET_TEXT would then wipe what's hidden, so only a paste is safe.
-        val textKnown = selStart <= current.length && selEnd <= current.length
+        // text; SET_TEXT would then wipe what's hidden, so only a paste is safe. So does an
+        // unknown cursor in a field with text (common in web pages): SET_TEXT would put the
+        // dictation at the end rather than where the user is typing.
+        val textKnown = current.isEmpty() ||
+            (selStart in 0..current.length && selEnd in 0..current.length)
         val start: Int
         val end: Int
         if (selStart < 0 || selEnd < 0 || !textKnown) {
@@ -612,17 +706,17 @@ class BubbleService : AccessibilityService() {
         }
         val before = current.substring(0, start)
         val after = current.substring(end)
-        val lead = if (before.isNotEmpty() && !before.last().isWhitespace() && text.isNotEmpty() && text.first() !in NO_SPACE_BEFORE) " " else ""
-        val trail = if (after.isNotEmpty() && after.first().isLetterOrDigit()) " " else ""
-        val insertion = lead + text + trail
+        val insertion = Insertion.fit(before, text, after)
 
         val ok = if (textKnown && setText(node, before + insertion + after, before.length + insertion.length)) {
             true
         } else {
             pasteInto(node, if (textKnown) insertion else text)
         }
-        if (ok) insertedTick.intValue++
-        else {
+        if (ok) {
+            insertedTick.intValue++
+            haptic(if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.CONTEXT_CLICK)
+        } else {
             copyToClipboard(text)
             Toast.makeText(this, "Couldn't type here — copied to clipboard", Toast.LENGTH_SHORT).show()
         }
@@ -646,7 +740,7 @@ class BubbleService : AccessibilityService() {
     /**
      * Fallback for fields that refuse ACTION_SET_TEXT: paste, then put the clipboard back.
      * Android may not let a background service read the clipboard; then there is nothing to
-     * restore and the dictation is cleared from it instead of being left behind.
+     * restore, and the dictation stays on it (marked sensitive) rather than leaving it empty.
      */
     private fun pasteInto(node: AccessibilityNodeInfo, text: String): Boolean {
         val cm = getSystemService(ClipboardManager::class.java)
@@ -660,11 +754,11 @@ class BubbleService : AccessibilityService() {
         }
         cm.setPrimaryClip(clip)
         val ok = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
-        val restore = Runnable {
-            runCatching { if (previous != null) cm.setPrimaryClip(previous) else cm.clearPrimaryClip() }
-        }
         // On failure restore at once, so a following "copied to clipboard" isn't undone.
-        if (ok) main.postDelayed(restore, 600) else restore.run()
+        if (previous != null) {
+            val restore = Runnable { runCatching { cm.setPrimaryClip(previous) } }
+            if (ok) main.postDelayed(restore, 600) else restore.run()
+        }
         return ok
     }
 
@@ -673,9 +767,30 @@ class BubbleService : AccessibilityService() {
             .setPrimaryClip(ClipData.newPlainText("Murmur", text))
     }
 
+    /**
+     * Password fields, including one whose password is shown: that one isn't flagged as a
+     * password, only its input type says so.
+     */
+    private fun isPassword(node: AccessibilityNodeInfo): Boolean {
+        if (node.isPassword) return true
+        val type = node.inputType
+        val variation = type and InputType.TYPE_MASK_VARIATION
+        return when (type and InputType.TYPE_MASK_CLASS) {
+            InputType.TYPE_CLASS_TEXT -> variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+                variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
+                variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
+            InputType.TYPE_CLASS_NUMBER -> variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            else -> false
+        }
+    }
+
     private companion object {
-        /** Dictation starting with these attaches to the previous word. */
-        const val NO_SPACE_BEFORE = ".,!?;:)'’"
+        /** Window changes that can show, hide, move or resize the keyboard, or change apps. */
+        const val WINDOW_CHANGES = AccessibilityEvent.WINDOWS_CHANGE_ADDED or
+            AccessibilityEvent.WINDOWS_CHANGE_REMOVED or
+            AccessibilityEvent.WINDOWS_CHANGE_BOUNDS or
+            AccessibilityEvent.WINDOWS_CHANGE_FOCUSED or
+            AccessibilityEvent.WINDOWS_CHANGE_ACTIVE
     }
 }
 

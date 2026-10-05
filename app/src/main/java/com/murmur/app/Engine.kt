@@ -95,7 +95,8 @@ object Engine {
         val rec = if (use == Backend.Npu) {
             try {
                 loadNpu(ctx)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                // Throwable: a missing QNN library is an UnsatisfiedLinkError, not an Exception.
                 Prefs.setNpuLoading(ctx, false)
                 Prefs.setNpuFailed(ctx, true)
                 if (!isCpuInstalled(ctx)) throw e
@@ -185,7 +186,7 @@ object Engine {
             probe.inputFinished()
             while (rec.isReady(probe)) rec.decode(probe)
             probe.release()
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             rec.release()
             throw e
         }
@@ -212,12 +213,14 @@ object Engine {
     private fun config(model: OnlineModelConfig) = OnlineRecognizerConfig(
         featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 128, dither = 0f),
         modelConfig = model,
-        // Split long dictation into segments at natural pauses, which keeps each
-        // decode short. The user still decides when dictation ends.
+        // Split long dictation into segments at natural pauses, which keeps the text read
+        // back after each step short. The user still decides when dictation ends. Every rule
+        // is live (the first argument only says whether speech must come first), so the
+        // length cap is set far beyond a dictation: it cut segments mid-word at 30 s.
         endpointConfig = EndpointConfig(
             rule1 = EndpointRule(false, 2.4f, 0f),
             rule2 = EndpointRule(true, 1.2f, 0f),
-            rule3 = EndpointRule(false, 0f, 30f),
+            rule3 = EndpointRule(false, 0f, 600f),
         ),
         enableEndpoint = true,
         decodingMethod = "greedy_search",
@@ -249,12 +252,20 @@ class Transcriber(private val rec: OnlineRecognizer, language: String? = null) {
     private fun join(tail: String) =
         listOf(committed.toString(), tail).filter { it.isNotBlank() }.joinToString(" ")
 
-    /** Adds audio and returns the transcript so far. */
+    /**
+     * Adds audio and returns the transcript so far, or null if it can't have changed: the
+     * model only steps once per 560 ms chunk, while audio arrives every 50 ms.
+     */
     @Synchronized
-    fun accept(samples: FloatArray): String {
-        if (released) return committed.toString()
+    fun accept(samples: FloatArray): String? {
+        if (released) return null
         stream.acceptWaveform(samples, SAMPLE_RATE)
-        while (rec.isReady(stream)) rec.decode(stream)
+        var decoded = false
+        while (rec.isReady(stream)) {
+            rec.decode(stream)
+            decoded = true
+        }
+        if (!decoded) return null
         val partial = rec.getResult(stream).text.trim()
         if (rec.isEndpoint(stream)) {
             if (partial.isNotEmpty()) {

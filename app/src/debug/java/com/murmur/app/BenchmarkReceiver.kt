@@ -17,15 +17,31 @@ class BenchmarkReceiver : BroadcastReceiver() {
         val runs = intent.getIntExtra("runs", 3)
         // Optional: another 16 kHz WAV inside the app's files folder, e.g. "model-npu/en.wav".
         val wav = intent.getStringExtra("wav")?.let { File(ctx.filesDir, it) } ?: SpeedTest.sample(ctx)
+        if (!wav.canonicalPath.startsWith(ctx.filesDir.canonicalPath + File.separator)) {
+            Log.e(TAG, "wav must be inside the app's files folder")
+            Log.i(TAG, "done")
+            return
+        }
+        if (Murmur.state.value.phase.let { it.isActive || it == Phase.Busy || it == Phase.Loading }) {
+            // Swapping models under a dictation would crash it.
+            Log.e(TAG, "Murmur is busy; try again when it's idle")
+            Log.i(TAG, "done")
+            return
+        }
         Thread {
             val useNpu = Prefs.useNpu(ctx)
+            val npuFailed = Prefs.npuFailed(ctx)
             try {
                 for (backend in listOf(Backend.Npu, Backend.Cpu)) bench(ctx, backend, runs, wav)
             } catch (e: Throwable) {
                 Log.e(TAG, "failed", e)
             } finally {
+                // Put the user's choice back as it was, including an NPU known to fail.
                 Prefs.setUseNpu(ctx, useNpu)
+                Prefs.setNpuFailed(ctx, npuFailed)
                 Engine.unload()
+                // Murmur is on: leave its model loaded, or the next dictation would wait for it.
+                if (DictationService.instance != null) runCatching { Engine.load(ctx) }
                 Log.i(TAG, "done")
             }
         }.start()

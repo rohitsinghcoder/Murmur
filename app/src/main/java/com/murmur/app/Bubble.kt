@@ -15,6 +15,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -33,12 +35,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,7 +59,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -71,6 +82,7 @@ const val COLLAPSE_MS = 90L + 260L
 private val Ink = Color(0xF51B1B1E)
 private val Edge = Color(0x29FFFFFF)
 private val Soft = Color(0xB3FFFFFF)
+private val Warn = Color(0xFFFFB4AB)
 
 /**
  * The floating control. A small mark when idle; while listening it widens into a pill with a
@@ -87,19 +99,20 @@ fun Bubble(
     /** The bubble sits on the left half of the screen, so the pill widens to the right. */
     growRight: Boolean,
     insertedTick: Int,
+    errorTick: Int,
     onTap: () -> Unit,
     onCancel: () -> Unit,
     onDragStart: () -> Unit,
     onDrag: () -> Unit,
     onDragEnd: () -> Unit,
+    onClose: () -> Unit,
+    onSwitchSide: () -> Unit,
 ) {
-    val state by Murmur.state.collectAsState()
-    val active = state.phase.isActive
-
-    // Keep showing the last words and waveform while the pill closes, instead of the
-    // "Listening…" placeholder the reset state would give.
-    var pill by remember { mutableStateOf(state) }
-    if (active) pill = state
+    // The state changes every 50 ms while listening (the waveform). Only the parts that read
+    // a value recompose when it changes; the waveform itself is only redrawn.
+    val state = Murmur.state.collectAsState()
+    val phase by remember { derivedStateOf { state.value.phase } }
+    val active = phase.isActive
 
     var showDone by remember { mutableStateOf(false) }
     LaunchedEffect(insertedTick) {
@@ -107,6 +120,14 @@ fun Bubble(
             showDone = true
             delay(1000)
             showDone = false
+        }
+    }
+    var showError by remember { mutableStateOf(false) }
+    LaunchedEffect(errorTick) {
+        if (errorTick > 0) {
+            showError = true
+            delay(1600)
+            showError = false
         }
     }
 
@@ -130,13 +151,40 @@ fun Bubble(
     val side = if (growRight) Alignment.CenterStart else Alignment.CenterEnd
     val label = when {
         active -> "Stop and type what you said"
-        state.phase == Phase.Off -> "Murmur is off. Open Murmur"
-        state.phase == Phase.Loading -> "Murmur is loading"
+        phase == Phase.Off -> "Murmur is off. Open Murmur"
+        phase == Phase.Loading || phase == Phase.Busy -> "Murmur is loading"
         else -> "Dictate"
     }
+    // The whole window, margin included, takes the touches: the margin is see-through but
+    // would swallow taps anyway, so it may as well make the bubble easier to hit.
+    val touches = remember { MutableInteractionSource() }
 
     Box(
-        Modifier.fillMaxSize().padding(BUBBLE_MARGIN_DP.dp),
+        Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = { onDragStart() },
+                    onDragEnd = onDragEnd,
+                    onDragCancel = onDragEnd,
+                ) { change, _ ->
+                    change.consume()
+                    onDrag()
+                }
+            }
+            .semantics {
+                contentDescription = label
+                role = Role.Button
+                if (!active) {
+                    // Dragging isn't possible with TalkBack; these do what dragging does.
+                    customActions = listOf(
+                        CustomAccessibilityAction("Move to the other side") { onSwitchSide(); true },
+                        CustomAccessibilityAction("Close bubble") { onClose(); true },
+                    )
+                }
+            }
+            .clickable(interactionSource = touches, indication = null, onClick = onTap)
+            .padding(BUBBLE_MARGIN_DP.dp),
         contentAlignment = side,
     ) {
         AnimatedVisibility(
@@ -152,18 +200,7 @@ fun Bubble(
                     .clip(shape)
                     .background(Ink)
                     .border(1.dp, Edge, shape)
-                    .pointerInput(Unit) {
-                        detectDragGestures(
-                            onDragStart = { onDragStart() },
-                            onDragEnd = onDragEnd,
-                            onDragCancel = onDragEnd,
-                        ) { change, _ ->
-                            change.consume()
-                            onDrag()
-                        }
-                    }
-                    .semantics { contentDescription = label }
-                    .clickable(onClick = onTap),
+                    .indication(touches, ripple()),
                 contentAlignment = side,
             ) {
                 if (pillAlpha > 0f) {
@@ -173,7 +210,7 @@ fun Bubble(
                             .wrapContentWidth(if (growRight) Alignment.Start else Alignment.End, unbounded = true)
                             .requiredWidth(PILL_WIDTH_DP.dp).alpha(pillAlpha),
                     ) {
-                        ListeningPill(pill, onCancel = onCancel, onStop = onTap)
+                        ListeningPill(state, active, stopFirst = growRight, onCancel = onCancel, onStop = onTap)
                     }
                 }
                 if (markAlpha > 0f) {
@@ -181,20 +218,29 @@ fun Bubble(
                         Modifier.size(BUBBLE_HEIGHT_DP.dp).alpha(markAlpha),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Crossfade(showDone, animationSpec = tween(180), label = "mark") { done ->
+                        val mark = when {
+                            showError -> Mark.Error
+                            showDone -> Mark.Done
+                            else -> Mark.Idle
+                        }
+                        Crossfade(mark, animationSpec = tween(180), label = "mark") { m ->
                             Box(Modifier.size(BUBBLE_HEIGHT_DP.dp), contentAlignment = Alignment.Center) {
                                 when {
-                                    done -> Icon(
+                                    m == Mark.Error -> Icon(
+                                        Icons.Rounded.Warning, null,
+                                        tint = Warn, modifier = Modifier.size(20.dp),
+                                    )
+                                    m == Mark.Done -> Icon(
                                         Icons.Rounded.Check, "Inserted",
                                         tint = Color.White, modifier = Modifier.size(22.dp),
                                     )
-                                    state.phase == Phase.Loading -> CircularProgressIndicator(
+                                    phase == Phase.Loading || phase == Phase.Busy -> CircularProgressIndicator(
                                         color = Color.White,
                                         strokeWidth = 2.dp,
                                         modifier = Modifier.size(18.dp),
                                     )
                                     else -> MurmurMark(
-                                        color = if (state.phase == Phase.Off) Soft.copy(alpha = 0.4f) else Color.White,
+                                        color = if (phase == Phase.Off) Soft.copy(alpha = 0.4f) else Color.White,
                                         modifier = Modifier.size(20.dp),
                                     )
                                 }
@@ -207,41 +253,56 @@ fun Bubble(
     }
 }
 
+private enum class Mark { Idle, Done, Error }
+
+/**
+ * The open pill. [stopFirst]: the pill grows rightwards from the bubble, so the stop button
+ * goes first, under the finger that started dictation; a second tap on the same spot stops
+ * instead of cancelling.
+ */
 @Composable
-private fun ListeningPill(state: DictationState, onCancel: () -> Unit, onStop: () -> Unit) {
+private fun ListeningPill(
+    state: State<DictationState>,
+    active: Boolean,
+    stopFirst: Boolean,
+    onCancel: () -> Unit,
+    onStop: () -> Unit,
+) {
+    // While the pill closes, the state is already reset: keep showing the last words and
+    // waveform instead of the "Listening…" placeholder.
+    val last = remember { LastShown() }
+    val finishing by remember { derivedStateOf { state.value.phase == Phase.Finishing } }
+    val partial by remember { derivedStateOf { state.value.partial } }
+    if (active) last.partial = partial
+    val text = if (active) partial else last.partial
+
     // Buttons get the pill's full height as their touch area; the visible circles stay small.
-    Row(
-        Modifier.fillMaxSize(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    // They stop working as soon as the pill starts closing.
+    val cancel = @Composable {
         Box(
-            Modifier.size(BUBBLE_HEIGHT_DP.dp).clip(CircleShape).clickable(onClick = onCancel),
+            Modifier.size(BUBBLE_HEIGHT_DP.dp).clip(CircleShape)
+                .semantics { role = Role.Button }
+                .clickable(enabled = active, onClick = onCancel),
             contentAlignment = Alignment.Center,
         ) {
             Icon(Icons.Rounded.Close, "Cancel dictation", tint = Soft, modifier = Modifier.size(16.dp))
         }
-        Column(Modifier.weight(1f)) {
-            Waveform(state.levels, Modifier.fillMaxWidth().height(14.dp))
-            Spacer(Modifier.height(1.dp))
-            Text(
-                state.partial.ifBlank { "Listening…" }.takeLast(60),
-                color = if (state.partial.isBlank()) Soft else Color.White,
-                fontSize = 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.StartEllipsis,
-            )
-        }
+    }
+    val stop = @Composable {
         Box(
             Modifier.size(BUBBLE_HEIGHT_DP.dp).clip(CircleShape)
-                .semantics { contentDescription = "Stop and type" }
-                .clickable(onClick = onStop),
+                .semantics {
+                    contentDescription = "Stop and type"
+                    role = Role.Button
+                }
+                .clickable(enabled = active && !finishing, onClick = onStop),
             contentAlignment = Alignment.Center,
         ) {
             Box(
                 Modifier.size(32.dp).clip(CircleShape).background(Color.White),
                 contentAlignment = Alignment.Center,
             ) {
-                if (state.phase == Phase.Finishing) {
+                if (finishing) {
                     CircularProgressIndicator(color = Ink, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
                 } else {
                     Box(Modifier.size(11.dp).clip(RoundedCornerShape(3.dp)).background(Ink))
@@ -249,18 +310,58 @@ private fun ListeningPill(state: DictationState, onCancel: () -> Unit, onStop: (
             }
         }
     }
+    // The pill's height is fixed, so very large font sizes are capped to keep the line whole.
+    val density = LocalDensity.current
+    val fontSize = with(density) { (12f * minOf(fontScale, 1.3f) / fontScale).sp }
+    Row(
+        Modifier.fillMaxSize(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (stopFirst) stop() else cancel()
+        Column(Modifier.weight(1f).padding(horizontal = 2.dp)) {
+            Waveform(
+                levels = {
+                    val levels = state.value.levels
+                    if (active && levels.isNotEmpty()) last.levels = levels
+                    if (active) levels else last.levels
+                },
+                Modifier.fillMaxWidth().height(14.dp),
+            )
+            Spacer(Modifier.height(1.dp))
+            Text(
+                text.ifBlank { "Listening…" }.takeLast(60),
+                color = if (text.isBlank()) Soft else Color.White,
+                fontSize = fontSize,
+                lineHeight = fontSize * 1.15f,
+                maxLines = 1,
+                overflow = TextOverflow.StartEllipsis,
+            )
+        }
+        if (stopFirst) cancel() else stop()
+    }
 }
 
-/** Scrolling level meter: one rounded bar per recent audio chunk, newest on the right. */
+/** What the closing pill keeps showing. Not state: it only changes while the pill is open. */
+private class LastShown {
+    var partial = ""
+    var levels: List<Float> = emptyList()
+}
+
+/**
+ * Scrolling level meter: one rounded bar per recent audio chunk, newest on the right.
+ * [levels] is read while drawing, so a new level only redraws the meter.
+ */
 @Composable
-fun Waveform(levels: List<Float>, modifier: Modifier, color: Color = Color.White, bars: Int = 28) {
+fun Waveform(levels: () -> List<Float>, modifier: Modifier, color: Color = Color.White, bars: Int = 28) {
     Canvas(modifier) {
+        val shown = levels()
         val gap = size.width / bars
         val stroke = gap * 0.55f
-        val shown = levels.takeLast(bars)
-        val offset = bars - shown.size
+        // The newest [bars] levels, right-aligned; empty slots on the left are faint stubs.
+        val offset = bars - minOf(bars, shown.size)
+        val skip = shown.size - (bars - offset)
         for (i in 0 until bars) {
-            val level = if (i >= offset) shown[i - offset] else 0f
+            val level = if (i >= offset) shown[skip + i - offset] else 0f
             val h = (size.height * (0.12f + 0.88f * level)).coerceAtMost(size.height)
             val x = gap * i + gap / 2
             val alpha = if (i >= offset) 0.95f else 0.25f

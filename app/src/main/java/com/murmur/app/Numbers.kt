@@ -16,22 +16,40 @@ object Numbers {
     private val tens = listOf("twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
     private val scales = mapOf("thousand" to 1_000L, "million" to 1_000_000L, "billion" to 1_000_000_000L)
     private val connectors = setOf("and", "point", "oh")
+    private val signs = setOf("minus", "negative")
 
     private val word = Regex("[A-Za-z']+")
     private val joiner = Regex("[ \\t-]+")
-    private val percent = Regex("^[ -]?(?:percent|per cent)\\b", RegexOption.IGNORE_CASE)
-    private val currency = Regex("^ (dollars?|rupees?|euros?)\\b", RegexOption.IGNORE_CASE)
-    private val ampm = Regex("^ ?([ap])\\.? ?m(?![a-z])(\\.)?", RegexOption.IGNORE_CASE)
+
+    // The patterns below are matched right after a number with [Regex.matchAt], so a long
+    // transcript is never copied or scanned once per number.
+    private val percent = Regex("[ -]?(?:percent|per cent)\\b", RegexOption.IGNORE_CASE)
+    private val currency = Regex(" (dollars?|rupees?|euros?)\\b", RegexOption.IGNORE_CASE)
+    /** Cents after the currency: "and fifty cents", "and five cents", or a bare "fifty" at the end. */
+    private val cents = Regex(
+        "( and)? (${(units.drop(1) + teens + tens).joinToString("|")})" +
+            "(?:[ -](${units.drop(1).joinToString("|")}))?( cents?)?\\b",
+        RegexOption.IGNORE_CASE,
+    )
+    private val ampm = Regex(" ?([ap])\\.? ?m(?![a-z])(\\.)?", RegexOption.IGNORE_CASE)
     /** "Which one am I?": a bare "am" followed by "I" is the verb. */
-    private val amVerb = Regex("^ ?am [Ii]\\b")
-    private val keepsDigits = Regex("^ (?:lakhs?|crores?|o'clock)\\b", RegexOption.IGNORE_CASE)
+    private val amVerb = Regex(" ?am [Ii]\\b")
+    /**
+     * Without "am" or "pm", "at three thirty" is a time only where the clause ends or a time
+     * word follows: "about two thirty people" and "after two twenty runs" are counts.
+     */
+    private val afterTime = Regex(
+        "$|[,.;:?!)]| (?:tomorrow|today|tonight|then|on|in|and|or|sharp|so|I|we|you|he|she|they)\\b",
+        RegexOption.IGNORE_CASE,
+    )
+    private val keepsDigits = Regex(" (?:lakhs?|crores?|o'clock)\\b", RegexOption.IGNORE_CASE)
     private val decadeNext = Regex(
-        "^ (?:twenties|thirties|forties|fifties|sixties|seventies|eighties|nineties|hundreds|thousands|millions)\\b",
+        " (?:twenties|thirties|forties|fifties|sixties|seventies|eighties|nineties|hundreds|thousands|millions)\\b",
         RegexOption.IGNORE_CASE,
     )
     /** An ordinal right after the number: "twenty-first", "one hundred and first", "twenty second". */
     private val ordinalNext = Regex(
-        "^(?:[ -]+and)?[ -]+(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|" +
+        "(?:[ -]+and)?[ -]+(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|" +
             "tenth|eleventh|twelfth|\\w+teenth|\\w+ieth|hundredth|thousandth|millionth|billionth)\\b",
         RegexOption.IGNORE_CASE,
     )
@@ -66,7 +84,15 @@ object Numbers {
     private fun isStart(w: String) = small(w) != null
     private fun isNumberWord(w: String) = isStart(w) || w == "hundred" || w in scales || w in connectors
 
-    fun format(text: String): String {
+    /** A word joined to the previous one by a hyphen, as in "twenty-dollar" or "first-time". */
+    private fun hyphenWordAt(text: String, i: Int) = text.getOrNull(i) == '-' && text.getOrNull(i + 1)?.isLetter() == true
+
+    /**
+     * [live] text is still being spoken: a number at its very end may still grow ("one
+     * hundred" → "one hundred twenty five"), so it stays words until something follows it.
+     * Otherwise the live text would flick through 100, 120, 125 on the way.
+     */
+    fun format(text: String, live: Boolean = false): String {
         val words = word.findAll(text).toList()
         if (words.none { isStart(it.value.lowercase()) }) return text
         val out = StringBuilder()
@@ -81,26 +107,43 @@ object Numbers {
             // The run of number words joined only by spaces or hyphens.
             var j = i
             while (j + 1 < words.size &&
-                joiner.matches(text.substring(words[j].range.last + 1, words[j + 1].range.first)) &&
+                joiner.matches(text.subSequence(words[j].range.last + 1, words[j + 1].range.first)) &&
                 isNumberWord(words[j + 1].value.lowercase())
             ) j++
+            if (live && (words[j].range.last + 1 until text.length).all { text[it].isWhitespace() }) break
             while (j > i && words[j].value.lowercase() in connectors) j--
 
             val run = words.subList(i, j + 1).map { it.value.lowercase() }
             val (items, used) = parse(run)
             val end = words[i + used - 1].range.last + 1
-            val prev = words.getOrNull(i - 1)?.takeIf {
-                text.substring(it.range.last + 1, first.range.first).isBlank()
-            }?.value?.lowercase()
+            val prevWord = words.getOrNull(i - 1)?.takeIf {
+                (it.range.last + 1 until first.range.first).all { k -> text[k].isWhitespace() }
+            }
+            val prev = prevWord?.value?.lowercase()
             val continues = scaleBefore.containsMatchIn(text.substring(maxOf(0, first.range.first - 20), first.range.first))
-            val written = if (continues) null else write(items, run.first(), prev, text.substring(end))
+            val written = if (continues) null else write(items, run.first(), prev, text, end)
             if (written != null) {
-                out.append(text, pos, first.range.first).append(written.first)
+                // "minus twenty" → -20, but not in sums like "fifty minus twenty" or "x minus ten".
+                val negative = prevWord != null && prev in signs && written.first[0].isDigit() &&
+                    plainWordBefore(text, prevWord.range.first)
+                val from = if (negative) prevWord!!.range.first else first.range.first
+                out.append(text, pos, from).append(if (negative) "-" else "").append(written.first)
                 pos = end + written.second
             }
             i += used
         }
         return out.append(text, pos, text.length).toString()
+    }
+
+    /** The token before [at] is absent or an ordinal word, not a number or a one-letter variable. */
+    private fun plainWordBefore(text: String, at: Int): Boolean {
+        var e = at
+        while (e > 0 && text[e - 1].isWhitespace()) e--
+        var s = e
+        while (s > 0 && !text[s - 1].isWhitespace()) s--
+        val token = text.substring(s, e).trimEnd(',', '.', ';', ':').lowercase()
+        if (token.isEmpty()) return true
+        return token.length > 1 && token.none { it.isDigit() } && !isNumberWord(token)
     }
 
     /**
@@ -148,9 +191,16 @@ object Numbers {
                         j++
                     }
                     if (count == 0 || digits.isEmpty()) break@loop
-                    items += Num(total + cur, count + 1 + digits.length, decimals = digits.toString())
+                    // "one point five million": kept as 1.5 million, like "5 million".
+                    val scale = w.getOrNull(j)?.takeIf { (it == "million" || it == "billion") && total == 0L }
+                    items += if (scale != null) {
+                        val size = scales.getValue(scale)
+                        Num(cur * size, count + 2 + digits.length, decimals = digits.toString(), scale = scale to size)
+                    } else {
+                        Num(total + cur, count + 1 + digits.length, decimals = digits.toString())
+                    }
                     reset()
-                    i = j
+                    i = if (scale != null) j + 1 else j
                     continue@loop
                 }
                 "oh" -> {
@@ -200,24 +250,32 @@ object Numbers {
         return items to i
     }
 
-    /** The written form of a run and how many characters after it were absorbed, or null to keep the words. */
-    private fun write(items: List<Num>, firstWord: String, prev: String?, rest: String): Pair<String, Int>? {
+    /**
+     * The written form of a run ending at [end] in [text] and how many characters after it
+     * were absorbed, or null to keep the words.
+     */
+    private fun write(items: List<Num>, firstWord: String, prev: String?, text: String, end: Int): Pair<String, Int>? {
         if (items.isEmpty()) return null
+        // "point five percent": the "point" was left as a word, so the number can't be read alone.
+        if (prev == "point") return null
         val a = items[0]
 
         // Ordinals stay words ("one hundred and first", "the twenty second"), except a tens
         // word and an ordinal unit written together: "twenty-first" → 21st.
-        ordinalNext.find(rest)?.let {
+        ordinalNext.matchAt(text, end)?.let {
             val unit = ordinalUnits[it.groupValues[1].lowercase()]
             val tens = a.value % 100 in 20..90 && a.value % 10 == 0L && a.decimals.isEmpty() && a.scale == null
-            if (unit != null && items.size == 1 && tens && !it.value.contains("and", ignoreCase = true)) {
+            // "twenty first-time buyers" are twenty buyers.
+            val compound = hyphenWordAt(text, it.range.last + 1)
+            if (unit != null && items.size == 1 && tens && !compound && !it.value.contains("and", ignoreCase = true)) {
                 return "${a.value / 10}${unit}" to it.value.length
             }
             return null
         }
 
-        // Years: "nineteen ninety nine", "twenty twenty five", "twenty oh five".
-        if (firstWord == "nineteen" || firstWord == "twenty") {
+        // Years: "nineteen ninety nine", "twenty twenty five", "twenty oh five". Not "twenty
+        // twenty-dollar bills".
+        if ((firstWord == "nineteen" || firstWord == "twenty") && !hyphenWordAt(text, end)) {
             if (items.size == 2 && a.words == 1 && items[1].decimals.isEmpty() && !items[1].oh && items[1].value in 10..99) {
                 return "${a.value * 100 + items[1].value}" to 0
             }
@@ -230,9 +288,10 @@ object Numbers {
         }
 
         // Times: "three thirty pm", "at ten fifteen", "seven am".
-        val meridiem = ampm.find(rest)?.takeUnless { amVerb.containsMatchIn(rest) }
-        val unitNext = percent.containsMatchIn(rest) || currency.containsMatchIn(rest) // "about three fifty dollars"
-        if (a.words == 1 && a.value in 1..12 && !unitNext && (meridiem != null || (prev != null && prev in timeCues))) {
+        val meridiem = ampm.matchAt(text, end)?.takeIf { amVerb.matchAt(text, end) == null }
+        val unitNext = percent.matchAt(text, end) != null || currency.matchAt(text, end) != null // "about three fifty dollars"
+        val cued = prev != null && prev in timeCues && afterTime.matchAt(text, end) != null
+        if (a.words == 1 && a.value in 1..12 && !unitNext && (meridiem != null || cued)) {
             val minutes = when {
                 items.size == 2 && items[1].decimals.isEmpty() && !items[1].oh && items[1].value in 10..59 -> items[1].value
                 items.size == 3 && items[1].oh && items[2].digit && items[2].value > 0 -> items[2].value
@@ -241,8 +300,8 @@ object Numbers {
             val suffix = meridiem?.let {
                 val m = " " + it.groupValues[1].uppercase() + "M"
                 // Keep a sentence-ending period that was part of "p.m.".
-                val endsSentence = it.groupValues[2].isNotEmpty() &&
-                    rest.substring(it.range.last + 1).let { r -> r.isBlank() || r.trimStart().firstOrNull()?.isUpperCase() == true }
+                val next = (it.range.last + 1 until text.length).firstOrNull { k -> !text[k].isWhitespace() }
+                val endsSentence = it.groupValues[2].isNotEmpty() && (next == null || text[next].isUpperCase())
                 (if (endsSentence) "$m." else m) to it.value.length
             }
             if (minutes != null) {
@@ -251,30 +310,53 @@ object Numbers {
             if (items.size == 1 && suffix != null) return "${a.value}${suffix.first}" to suffix.second
         }
 
-        // Spelled-out digits, like a phone number: "nine eight seven six".
-        if (items.size >= 3 && items.all { it.digit || it.oh }) {
+        // Spelled-out digits, like a phone number: "nine eight seven six". Not counting
+        // ("one two three go").
+        if (items.size >= 3 && items.all { it.digit || it.oh } &&
+            items.withIndex().any { (k, n) -> n.oh || n.value != k + 1L }
+        ) {
             return items.joinToString("") { it.value.toString() } to 0
         }
 
         // Anything else made of several numbers is ambiguous ("one two", "five ten"): keep it.
         if (items.size != 1) return null
-        if (decadeNext.containsMatchIn(rest)) return null // "the nineteen sixties"
-        percent.find(rest)?.let { return "${digits(a)}%" to it.value.length }
-        currency.find(rest)?.let {
+        if (decadeNext.matchAt(text, end) != null) return null // "the nineteen sixties"
+        percent.matchAt(text, end)?.let { return "${digits(a)}%" to it.value.length }
+        currency.matchAt(text, end)?.let {
             val symbol = when (it.groupValues[1].lowercase().first()) {
                 'd' -> "$"
                 'r' -> "₹"
                 else -> "€"
             }
-            return "$symbol${digits(a)}" to it.value.length
+            val c = if (a.scale == null && a.decimals.isEmpty()) cents(text, it.range.last + 1) else null
+            val amount = digits(a) + (c?.let { (value, _) -> "." + value.toString().padStart(2, '0') } ?: "")
+            return "$symbol$amount" to it.value.length + (c?.second ?: 0)
         }
-        if (a.value >= 10 || a.decimals.isNotEmpty() || keepsDigits.containsMatchIn(rest)) return digits(a) to 0
+        if (a.value >= 10 || a.decimals.isNotEmpty() || keepsDigits.matchAt(text, end) != null) return digits(a) to 0
         return null
     }
 
+    /**
+     * Cents after "dollars" at [at]: "and fifty cents", "fifty cents", or "fifty" ending the
+     * clause ("twenty five dollars fifty"). Returns the cents and the characters they span.
+     */
+    private fun cents(text: String, at: Int): Pair<Int, Int>? {
+        val m = cents.matchAt(text, at) ?: return null
+        val (and, head, unit, word) = m.destructured
+        val h = small(head.lowercase()) ?: return null
+        if (unit.isNotEmpty() && (h < 20 || h % 10 != 0)) return null
+        val value = h + (if (unit.isEmpty()) 0 else small(unit.lowercase()) ?: return null)
+        if (value !in 1..99) return null
+        // Without "cents", "five dollars and ten minutes" or "ten dollars fifty times" isn't money.
+        val endsClause = (m.range.last + 1).let { k -> k == text.length || text[k] in ",.;:?!)" }
+        if (word.isEmpty() && (and.isNotEmpty() || !endsClause)) return null
+        return value to m.value.length
+    }
+
     private fun digits(n: Num): String {
-        n.scale?.let { (word, size) -> return "${grouped(n.value / size)} $word" }
-        return grouped(n.value) + if (n.decimals.isNotEmpty()) "." + n.decimals else ""
+        val decimals = if (n.decimals.isNotEmpty()) "." + n.decimals else ""
+        n.scale?.let { (word, size) -> return "${grouped(n.value / size)}$decimals $word" }
+        return grouped(n.value) + decimals
     }
 
     // No separators under 10,000, so years and "2500" stay as typed.

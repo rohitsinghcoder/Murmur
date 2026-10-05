@@ -101,6 +101,9 @@ class CleanupTest {
             "Meet me at three thirty pm.", "It costs twenty five dollars.", "Call nine eight seven six.",
             "Twenty-first century.", "The nineteen sixties.", "fifty percent", "two million dollars",
             "a hundred and fifty", "Which one am I?", "at twelve oh five", "three point one four",
+            "Well — um — fine.", "He said \"um\" a lot.", "Uh huh.", "I I think", "the the the end",
+            "twenty five dollars and fifty cents", "one point five million dollars", "minus twenty degrees",
+            "Um — so yeah", "I have twenty twenty-dollar bills.", "one two three go",
         )
         for (s in samples) {
             val once = Cleanup.tidy(s)
@@ -120,6 +123,81 @@ class CleanupTest {
         }
         tidy(final, "So I think we should meet at 3:30 PM.")
         tidy("Um, so I think, uh, we", "So I think we")
+    }
+
+    @Test fun keepsCapitalizedWordsAndMillimetres() {
+        val kept = listOf(
+            "We went to the ER last night.", "I went to UM for college.", "Cut it to 5 mm.",
+            "Cut it to 5mm.", "HMM is a model.", "AH and UH are airports.",
+        )
+        for (text in kept) fillers(text, text)
+        fillers("Er, I went to UM.", "I went to UM.")
+        fillers("Mm, okay.", "Okay.")
+    }
+
+    @Test fun removesDashOrEllipsisLeftByFiller() {
+        fillers("Well — um — fine.", "Well — fine.")
+        fillers("Yes — um, okay.", "Yes — okay.")
+        fillers("Um — so yeah", "So yeah")
+        fillers("Um – so yeah", "So yeah")
+        fillers("Um - so yeah", "So yeah")
+        fillers("Um… so yeah", "So yeah")
+        fillers("I think, um… yes.", "I think… yes.")
+    }
+
+    @Test fun keepsQuotedOrBracketedFiller() {
+        val kept = listOf("He said \"um\" a lot.", "\"Um,\" he said.", "I think (um) yes.", "The word “uh” is filler.")
+        for (text in kept) fillers(text, text)
+        fillers("(um, maybe)", "(maybe)")
+    }
+
+    @Test fun keepsSpacedBackchannels() {
+        fillers("Uh huh.", "Uh-huh.")
+        fillers("uh oh", "uh-oh")
+        fillers("mm hmm, sure", "mm-hmm, sure")
+        fillers("Um hum.", "Um-hum.")
+        // Two fillers in a row are still fillers.
+        fillers("Uh, uh, okay.", "Okay.")
+        fillers("um um uh", "")
+    }
+
+    @Test fun collapsesStutters() {
+        tidy("I I think so.", "I think so.")
+        tidy("And, um, the the problem is", "And the problem is")
+        tidy("I, um, I think so.", "I think so.")
+        tidy("The the end.", "The end.")
+        tidy("i i know", "I know")
+        // Words that can be meant twice stay.
+        val kept = listOf("It was so so.", "That that is true.", "He had had enough.", "Bye bye.", "Theme the them.")
+        for (text in kept) tidy(text, text)
+    }
+
+    @Test fun leavesOtherLanguagesAsSpoken() {
+        for (text in listOf("Er sagt, um zehn Uhr kommt er.", "Eu tenho um carro.", "Ho visto i ragazzi.", "twenty five")) {
+            assertSame(text, Cleanup.tidy(text, english = false))
+        }
+    }
+
+    @Test fun liveTextLeavesTrailingNumberAsWords() {
+        fun live(input: String, expected: String) =
+            assertEquals("tidy(\"$input\", live)", expected, Cleanup.tidy(input, live = true))
+        live("I paid one hundred", "I paid one hundred")
+        live("I paid one hundred and", "I paid one hundred and")
+        live("I paid one hundred twenty five dollars", "I paid $125")
+        live("In twenty twenty", "In twenty twenty")
+        live("In twenty twenty five I", "In 2025 I")
+        live("Um, at three thirty", "At three thirty")
+        live("We got fifty percent", "We got 50%")
+        live("It's twenty.", "It's 20.")
+        // Each live step shows either the words or the final digits, never a wrong number.
+        val final = "I paid one hundred twenty five dollars at three thirty pm"
+        val words = final.split(" ")
+        val steps = (1..words.size).map { Cleanup.tidy(words.take(it).joinToString(" "), live = true) }
+        assertEquals(listOf("I", "I paid", "I paid one", "I paid one hundred", "I paid one hundred twenty",
+            "I paid one hundred twenty five", "I paid $125", "I paid $125 at", "I paid $125 at three",
+            "I paid $125 at three thirty", "I paid $125 at 3:30 PM"), steps)
+        assertEquals(Cleanup.tidy(final), steps.last())
+        for (s in steps) assertEquals(s, Cleanup.tidy(s, live = true))
     }
 
     @Test fun handlesLongTextQuickly() {

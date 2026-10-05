@@ -1,11 +1,12 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Build, install over wireless adb, and launch Murmur.
-set -e
+set -euo pipefail
 cd "$(dirname "$0")"
 gradle assembleDebug -q --console=plain
 # adb runs in TCP mode on a fixed port (set once per boot with `adb tcpip 5555`),
 # so reconnecting is always the same command.
-adb connect localhost:5555 >/dev/null
+adb connect localhost:5555 | grep -q connected ||
+    { echo "adb isn't listening on localhost:5555; enable Wireless debugging and run adb tcpip 5555." >&2; exit 1; }
 export ANDROID_SERIAL=localhost:5555
 timeout 300 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.murmur.app/.MainActivity

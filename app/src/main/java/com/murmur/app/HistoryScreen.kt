@@ -16,9 +16,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
@@ -50,6 +52,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,10 +62,14 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
@@ -76,26 +83,37 @@ fun shareText(ctx: Context, text: String) {
     ctx.startActivity(Intent.createChooser(send, null))
 }
 
-/** "Today", "Yesterday", or a short date such as "Mon, 22 Sep". */
+/**
+ * "Today", "Yesterday", or a short date such as "Mon, 22 Sep". Earlier years add the year,
+ * so the same day in two years doesn't become one group.
+ */
 fun dayLabel(ctx: Context, at: Long): String {
     val today = startOfDay(0)
     return when {
         at >= today -> "Today"
         at >= startOfDay(1) -> "Yesterday"
-        else -> DateFormat.format(DateFormat.getBestDateTimePattern(Locale.getDefault(), "EEEdMMM"), at).toString()
+        else -> {
+            val skeleton = if (at >= startOfYear()) "EEEdMMM" else "yMMMEd"
+            DateFormat.format(DateFormat.getBestDateTimePattern(Locale.getDefault(), skeleton), at).toString()
+        }
     }
 }
 
-private fun startOfDay(daysAgo: Int): Long = java.util.Calendar.getInstance().apply {
-    set(java.util.Calendar.HOUR_OF_DAY, 0)
-    set(java.util.Calendar.MINUTE, 0)
-    set(java.util.Calendar.SECOND, 0)
-    set(java.util.Calendar.MILLISECOND, 0)
-    add(java.util.Calendar.DAY_OF_YEAR, -daysAgo)
+private fun midnight(change: Calendar.() -> Unit): Long = Calendar.getInstance().apply {
+    set(Calendar.HOUR_OF_DAY, 0)
+    set(Calendar.MINUTE, 0)
+    set(Calendar.SECOND, 0)
+    set(Calendar.MILLISECOND, 0)
+    change()
 }.timeInMillis
 
-fun metaLine(ctx: Context, d: Dictation): String = listOfNotNull(
-    DateFormat.getTimeFormat(ctx).format(Date(d.at)),
+private fun startOfDay(daysAgo: Int): Long = midnight { add(Calendar.DAY_OF_YEAR, -daysAgo) }
+
+private fun startOfYear(): Long = midnight { set(Calendar.DAY_OF_YEAR, 1) }
+
+/** [time] is the phone's time format (12 or 24 hour), made once and shared by all rows. */
+fun metaLine(time: java.text.DateFormat, d: Dictation): String = listOfNotNull(
+    time.format(Date(d.at)),
     d.app,
     if (d.audioMs > 0) String.format(Locale.US, "%.0f s", d.audioMs / 1000f) else null,
 ).joinToString(" · ")
@@ -103,13 +121,15 @@ fun metaLine(ctx: Context, d: Dictation): String = listOfNotNull(
 @Composable
 fun HistoryScreen(
     items: List<Dictation>,
+    loaded: Boolean,
+    timeFormat: java.text.DateFormat,
     onBack: () -> Unit,
     onCopy: (Dictation) -> Unit,
     onDelete: (Dictation) -> Unit,
     onClearAll: () -> Unit,
 ) {
     val ctx = LocalContext.current
-    var query by remember { mutableStateOf("") }
+    var query by rememberSaveable { mutableStateOf("") }
     var confirmClear by remember { mutableStateOf(false) }
     val shown = remember(items, query) {
         val q = query.trim()
@@ -129,7 +149,9 @@ fun HistoryScreen(
                 start = 20.dp,
                 end = 20.dp,
                 top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp,
-                bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 24.dp,
+                // imePadding already lifts the list above the keyboard, which covers the nav bar.
+                bottom = WindowInsets.navigationBars.exclude(WindowInsets.ime).asPaddingValues()
+                    .calculateBottomPadding() + 24.dp,
             ),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -165,7 +187,7 @@ fun HistoryScreen(
                         Text("History", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            if (items.isEmpty()) "Your dictations will appear here"
+                            if (items.isEmpty()) (if (loaded) "Your dictations will appear here" else "")
                             else "${"%,d".format(wordsToday)} words today · ${"%,d".format(wordsTotal)} in total",
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -176,7 +198,8 @@ fun HistoryScreen(
             }
 
             if (items.isEmpty()) {
-                item(key = "empty") {
+                // Until the file is read, an empty list doesn't mean there is no history.
+                if (loaded) item(key = "empty") {
                     Column(
                         Modifier.fillMaxWidth().padding(top = 72.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -228,6 +251,7 @@ fun HistoryScreen(
                     DictationRow(
                         d,
                         modifier = Modifier.animateItem(),
+                        timeFormat = timeFormat,
                         onCopy = { onCopy(d) },
                         onDelete = { onDelete(d) },
                     )
@@ -285,7 +309,7 @@ private fun SearchField(query: String, onChange: (String) -> Unit) {
                             Text(
                                 "Search your dictations",
                                 style = style,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                         inner()
@@ -301,14 +325,23 @@ private fun SearchField(query: String, onChange: (String) -> Unit) {
     }
 }
 
-/** One saved dictation. Tap copies it; long-press offers copy, share and delete. */
+/**
+ * One saved dictation. Tap copies it; long-press offers share and delete, which TalkBack also
+ * lists as actions. Deleting is immediate: the caller offers undo.
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun DictationRow(d: Dictation, modifier: Modifier, onCopy: () -> Unit, onDelete: (() -> Unit)?) {
+fun DictationRow(
+    d: Dictation,
+    modifier: Modifier,
+    timeFormat: java.text.DateFormat,
+    onCopy: () -> Unit,
+    onDelete: (() -> Unit)?,
+) {
     val ctx = LocalContext.current
     val haptics = LocalHapticFeedback.current
-    var confirmDelete by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
+    val meta = remember(d, timeFormat) { metaLine(timeFormat, d) }
     Box(modifier) {
         Surface(
             shape = RoundedCornerShape(22.dp),
@@ -321,7 +354,12 @@ fun DictationRow(d: Dictation, modifier: Modifier, onCopy: () -> Unit, onDelete:
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                     menu = true
                 },
-            ),
+            ).semantics {
+                customActions = listOfNotNull(
+                    CustomAccessibilityAction("Share") { shareText(ctx, d.text); true },
+                    onDelete?.let { delete -> CustomAccessibilityAction("Delete") { delete(); true } },
+                )
+            },
         ) {
             Column(Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
                 Text(
@@ -332,7 +370,7 @@ fun DictationRow(d: Dictation, modifier: Modifier, onCopy: () -> Unit, onDelete:
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    metaLine(ctx, d),
+                    meta,
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -353,27 +391,9 @@ fun DictationRow(d: Dictation, modifier: Modifier, onCopy: () -> Unit, onDelete:
                 DropdownMenuItem(
                     text = { Text("Delete") },
                     leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
-                    onClick = { menu = false; confirmDelete = true },
+                    onClick = { menu = false; onDelete() },
                 )
             }
         }
-    }
-    if (confirmDelete && onDelete != null) {
-        AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            title = { Text("Delete this dictation?") },
-            text = {
-                Text(
-                    d.text,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            },
-            confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") } },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
-            shape = RoundedCornerShape(28.dp),
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        )
     }
 }

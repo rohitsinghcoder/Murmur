@@ -34,7 +34,8 @@ if [ "${1:-}" = "--npu" ]; then
 fi
 
 download() { # url, destination
-    curl -fL --progress-bar -o "$2.part" "$1"
+    # Resumes an interrupted download instead of starting the large files over.
+    curl -fL --retry 3 -C - --progress-bar -o "$2.part" "$1"
     mv "$2.part" "$2"
 }
 

@@ -45,7 +45,9 @@ phone (OnePlus 15, Termux).
 - `Bubble.kt` — bubble/pill UI. The overlay window has fixed sizes; only Compose animates.
 - `MainActivity.kt`, `HistoryScreen.kt` — setup checklist, try-it box, speed test, history.
 - `Cleanup.kt`, `Numbers.kt` — filler-word removal and spoken numbers to digits, applied to
-  the live and final transcript.
+  the live and final transcript (English only; skipped for other NPU languages).
+- `Insertion.kt` — fits the transcript to the text around the cursor (spacing, capitals, period).
+- Unit tests (`Cleanup`, `Numbers`, `Insertion`) are plain JVM; `./gradlew testDebugUnitTest`.
 - `History.kt` — dictation history as JSON lines in app-private storage.
 - `State.kt`, `Theme.kt` — shared dictation state, theme and bubble-position prefs.
 

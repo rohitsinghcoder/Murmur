@@ -7,7 +7,8 @@ adb logcat -c
 adb shell am start -W -n com.murmur.app/.MainActivity >/dev/null
 adb shell am broadcast -n com.murmur.app/.BenchmarkReceiver --ei runs "${1:-3}" ${2:+--es wav "$2"} >/dev/null
 echo "Running (takes a minute)..."
-adb logcat -s MurmurBench:I '*:F' | while IFS= read -r line; do
+# Gives up after 10 minutes, or as soon as the app crashes (a failing NPU aborts the process).
+timeout 600 adb logcat -s MurmurBench:I '*:F' | while IFS= read -r line; do
     echo "$line" | sed 's/.*MurmurBench: //'
-    case "$line" in *MurmurBench*done*) break ;; esac
+    case "$line" in *MurmurBench*done* | *"Fatal signal"*) break ;; esac
 done

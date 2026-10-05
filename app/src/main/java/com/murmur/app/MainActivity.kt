@@ -1,10 +1,14 @@
 package com.murmur.app
 
 import android.Manifest
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
@@ -12,6 +16,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -31,18 +36,24 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -68,16 +79,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,13 +101,22 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     // Bumped on resume so permission and settings state is re-read after visiting Settings.
@@ -102,8 +125,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Before setContent, so the first frame is already drawn behind the system bars.
+        enableEdgeToEdge()
         themeMode.value = Prefs.theme(this)
-        History.load(this)
+        // Up to thousands of lines of JSON: read them off the main thread.
+        lifecycleScope.launch(Dispatchers.IO) { History.load(applicationContext) }
         setContent {
             MurmurTheme(themeMode.value) {
                 MurmurApp(
@@ -135,22 +161,70 @@ private fun bubbleEnabled(ctx: Context): Boolean {
     return enabled.split(':').any { it.equals(full, true) || it.equals(short, true) }
 }
 
+/** Opens the first of [intents] this phone has; some makers leave out or lock settings pages. */
+private fun openFirst(ctx: Context, intents: List<Intent>) {
+    for (intent in intents) {
+        try {
+            ctx.startActivity(intent)
+            return
+        } catch (_: ActivityNotFoundException) {
+        } catch (_: SecurityException) {
+        }
+    }
+}
+
+/** The main screen without the live waveform and transcript, which change every few ms. */
+private fun DictationState.withoutLive() = copy(levels = emptyList(), partial = "")
+
+/** Speed test progress, kept above the list so it survives the card scrolling out of view. */
+private class SpeedTestState {
+    var running by mutableStateOf(false)
+    var result by mutableStateOf<SpeedResult?>(null)
+    var error by mutableStateOf<String?>(null)
+
+    fun run() {
+        error = null
+        running = true
+        // The service runs it on the model's thread, so a dictation can't start meanwhile.
+        val started = DictationService.instance?.speedTest { r ->
+            running = false
+            r.onSuccess { result = it }.onFailure { error = it.message ?: it.toString() }
+        } == true
+        if (!started) running = false
+    }
+}
+
 @Composable
 private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) -> Unit) {
     val ctx = LocalContext.current
-    val state by Murmur.state.collectAsState()
+    // Only the try-it box shows the live waveform and text; the rest of the screen needn't
+    // recompose for every chunk of audio.
+    val state by remember { Murmur.state.map { it.withoutLive() }.distinctUntilChanged() }
+        .collectAsState(Murmur.state.value.withoutLive())
     val history by History.items.collectAsState()
+    val historyLoaded by History.loaded.collectAsState()
     var appearanceOpen by remember { mutableStateOf(false) }
-    var historyOpen by remember { mutableStateOf(false) }
+    var historyOpen by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    val speed = remember { SpeedTestState() }
+    val timeFormat = remember(resumeTick) { android.text.format.DateFormat.getTimeFormat(ctx) }
 
     fun copy(d: Dictation) {
         copyText(ctx, d.text)
         // Android 13+ confirms copies itself; a snackbar on top would say it twice.
-        if (android.os.Build.VERSION.SDK_INT < 33) scope.launch {
+        if (Build.VERSION.SDK_INT < 33) scope.launch {
             snackbar.currentSnackbarData?.dismiss()
             snackbar.showSnackbar("Copied to clipboard", duration = SnackbarDuration.Short)
+        }
+    }
+
+    fun delete(d: Dictation) {
+        History.delete(ctx, d.id)
+        scope.launch {
+            snackbar.currentSnackbarData?.dismiss()
+            val result = snackbar.showSnackbar("Dictation deleted", "Undo", duration = SnackbarDuration.Long)
+            if (result == SnackbarResult.ActionPerformed) History.restore(ctx, d)
         }
     }
 
@@ -159,24 +233,50 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
     }
     val modelInstalled = remember(resumeTick) { Engine.isModelInstalled(ctx) }
     val npuInstalled = remember(resumeTick) { Engine.isNpuInstalled(ctx) }
+    val cpuInstalled = remember(resumeTick) { Engine.isCpuInstalled(ctx) }
+    val hasSample = remember(resumeTick) { SpeedTest.sample(ctx).exists() }
     val bubbleOn = remember(resumeTick) { bubbleEnabled(ctx) }
     val batteryFree = remember(resumeTick) {
         ctx.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
     }
     var micNow by remember { mutableStateOf(false) }
+    // Once the user has said no for good, Android stops showing the dialog: send them to Settings.
+    var micAsked by rememberSaveable { mutableStateOf(false) }
     val permissions = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result -> micNow = result[Manifest.permission.RECORD_AUDIO] == true }
     val hasMic = micGranted || micNow
+    // Android 13+ hides the notification (and its Turn off button) without this permission.
+    // Murmur works without it, so start either way.
+    var notificationsAsked by rememberSaveable { mutableStateOf(false) }
+    val notifications = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { DictationService.start(ctx) }
 
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+    fun start() {
+        if (Build.VERSION.SDK_INT >= 33 && !notificationsAsked &&
+            ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationsAsked = true
+            notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            DictationService.start(ctx)
+        }
+    }
+
+    Surface(
+        Modifier.fillMaxSize().then(if (historyOpen) Modifier.clearAndSetSemantics {} else Modifier),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
         LazyColumn(
             Modifier.fillMaxSize().imePadding(),
             contentPadding = PaddingValues(
                 start = 20.dp,
                 end = 20.dp,
                 top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 24.dp,
-                bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 32.dp,
+                // imePadding already lifts the list above the keyboard, which covers the nav bar.
+                bottom = WindowInsets.navigationBars.exclude(WindowInsets.ime).asPaddingValues()
+                    .calculateBottomPadding() + 32.dp,
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -187,8 +287,12 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
             item(key = "status") {
                 StatusCard(
                     state = state,
-                    canStart = hasMic && modelInstalled,
-                    onStart = { DictationService.start(ctx) },
+                    cantStart = when {
+                        !hasMic -> "Allow the microphone first"
+                        !modelInstalled -> "Voice model not installed"
+                        else -> null
+                    },
+                    onStart = { start() },
                     onStop = { DictationService.stop(ctx) },
                 )
             }
@@ -206,14 +310,32 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
                             done = hasMic,
                             action = "Allow",
                         ) {
-                            permissions.launch(
-                                arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
-                            )
+                            val activity = ctx as Activity
+                            if (micAsked && !activity.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
+                                openFirst(
+                                    ctx,
+                                    listOf(
+                                        Intent(
+                                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                            Uri.fromParts("package", ctx.packageName, null),
+                                        )
+                                    ),
+                                )
+                            } else {
+                                micAsked = true
+                                permissions.launch(
+                                    if (Build.VERSION.SDK_INT >= 33) {
+                                        arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+                                    } else {
+                                        arrayOf(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                )
+                            }
                         }
                         SetupRow(
                             "Voice model",
                             if (modelInstalled) "Nemotron · runs entirely on your phone"
-                            else "Not found in ${Engine.modelDir(ctx).path}",
+                            else "Not installed — see README (scripts/install-model.sh)",
                             done = modelInstalled,
                             action = null,
                         ) {}
@@ -223,19 +345,30 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
                             done = bubbleOn,
                             action = "Turn on",
                         ) {
-                            ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                            // Android 13+ can open Murmur's own page instead of the full list.
+                            val details = if (Build.VERSION.SDK_INT >= 33) {
+                                Intent(Settings.ACTION_ACCESSIBILITY_DETAILS_SETTINGS).putExtra(
+                                    Intent.EXTRA_COMPONENT_NAME,
+                                    ComponentName(ctx, BubbleService::class.java).flattenToString(),
+                                )
+                            } else null
+                            openFirst(ctx, listOfNotNull(details, Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)))
                         }
                         SetupRow(
                             "Stay ready",
-                            "Keeps OnePlus from closing Murmur in the background",
+                            "Keeps your phone from closing Murmur in the background",
                             done = batteryFree,
                             action = "Allow",
                         ) {
-                            ctx.startActivity(
-                                Intent(
-                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                    Uri.parse("package:${ctx.packageName}"),
-                                )
+                            openFirst(
+                                ctx,
+                                listOf(
+                                    Intent(
+                                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                        Uri.parse("package:${ctx.packageName}"),
+                                    ),
+                                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                                ),
                             )
                         }
                     }
@@ -245,7 +378,7 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
             if (npuInstalled) {
                 item(key = "voice-label") { SectionLabel("Voice") }
                 item(key = "voice") {
-                    VoiceCard(state, cpuInstalled = Engine.isCpuInstalled(ctx), tick = resumeTick)
+                    VoiceCard(state, cpuInstalled = cpuInstalled, tick = resumeTick)
                 }
             }
 
@@ -262,12 +395,12 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
                     }
                 }
                 items(history.take(3), key = { "recent-${it.id}" }) { d ->
-                    DictationRow(d, Modifier.animateItem(), onCopy = { copy(d) }, onDelete = null)
+                    DictationRow(d, Modifier.animateItem(), timeFormat, onCopy = { copy(d) }, onDelete = null)
                 }
             }
 
-            if (SpeedTest.sample(ctx).exists()) {
-                item(key = "speed") { SpeedCard(enabled = state.phase == Phase.Ready) }
+            if (hasSample) {
+                item(key = "speed") { SpeedCard(speed, enabled = state.phase == Phase.Ready) }
             }
         }
     }
@@ -280,15 +413,17 @@ private fun MurmurApp(resumeTick: Int, theme: ThemeMode, onTheme: (ThemeMode) ->
         BackHandler { historyOpen = false }
         HistoryScreen(
             items = history,
+            loaded = historyLoaded,
+            timeFormat = timeFormat,
             onBack = { historyOpen = false },
             onCopy = { copy(it) },
-            onDelete = { History.delete(ctx, it.id) },
+            onDelete = { delete(it) },
             onClearAll = { History.clear(ctx) },
         )
     }
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
-        SnackbarHost(snackbar, Modifier.padding(WindowInsets.navigationBars.asPaddingValues()))
+        SnackbarHost(snackbar, Modifier.windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)))
     }
 
     if (appearanceOpen) {
@@ -344,8 +479,9 @@ private fun SectionLabel(text: String) {
     )
 }
 
+/** [cantStart] says why Start is disabled, or is null when it can be tapped. */
 @Composable
-private fun StatusCard(state: DictationState, canStart: Boolean, onStart: () -> Unit, onStop: () -> Unit) {
+private fun StatusCard(state: DictationState, cantStart: String?, onStart: () -> Unit, onStop: () -> Unit) {
     val on = state.phase != Phase.Off
     val container by animateColorAsState(
         if (on && state.phase != Phase.Loading) MaterialTheme.colorScheme.primaryContainer
@@ -379,11 +515,13 @@ private fun StatusCard(state: DictationState, canStart: Boolean, onStart: () -> 
                             Phase.Off -> "Murmur is off"
                             Phase.Loading -> "Loading voice model…"
                             Phase.Ready -> "Ready"
+                            Phase.Busy -> "Running speed test…"
                             Phase.Listening -> "Listening…"
                             Phase.Finishing -> "Finishing…"
                         },
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                     )
                     Text(
                         when (state.phase) {
@@ -402,24 +540,35 @@ private fun StatusCard(state: DictationState, canStart: Boolean, onStart: () -> 
             }
             state.error?.let {
                 Spacer(Modifier.height(12.dp))
-                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
             }
             Spacer(Modifier.height(18.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                state.loadMs?.takeIf { on }?.let {
+                val note = if (on) {
+                    state.loadMs?.let { "Model loaded in ${seconds(it)}" + (state.backend?.let { b -> " · ${b.label}" } ?: "") }
+                } else cantStart
+                if (note != null) {
                     Text(
-                        "Model loaded in ${seconds(it)}" + (state.backend?.let { b -> " · ${b.label}" } ?: ""),
+                        note,
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
                     )
+                    Spacer(Modifier.size(8.dp))
+                } else {
+                    Spacer(Modifier.weight(1f))
                 }
-                Spacer(Modifier.weight(1f))
                 if (on) {
                     TextButton(onClick = onStop) { Text("Turn off") }
                 } else {
                     Button(
                         onClick = onStart,
-                        enabled = canStart,
+                        enabled = cantStart == null,
                         shape = RoundedCornerShape(16.dp),
                         contentPadding = PaddingValues(horizontal = 28.dp, vertical = 14.dp),
                     ) { Text("Start") }
@@ -432,7 +581,10 @@ private fun StatusCard(state: DictationState, canStart: Boolean, onStart: () -> 
 @Composable
 private fun SetupRow(title: String, body: String, done: Boolean, action: String?, onAction: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
+        Modifier
+            .fillMaxWidth()
+            .semantics(mergeDescendants = true) { stateDescription = if (done) "Done" else "Not done" }
+            .padding(horizontal = 18.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -448,7 +600,7 @@ private fun SetupRow(title: String, body: String, done: Boolean, action: String?
             if (done) {
                 Icon(
                     Icons.Rounded.Check,
-                    contentDescription = "Done",
+                    contentDescription = null,
                     tint = MaterialTheme.colorScheme.onPrimary,
                     modifier = Modifier.size(16.dp),
                 )
@@ -468,7 +620,10 @@ private fun SetupRow(title: String, body: String, done: Boolean, action: String?
 
 @Composable
 private fun TryCard(state: DictationState) {
-    var text by remember { mutableStateOf("") }
+    var text by rememberSaveable { mutableStateOf("") }
+    // Read only where drawn or shown, so a new audio chunk redraws the waveform and the
+    // transcript line, not the whole card.
+    val live = Murmur.state.collectAsState()
     val listening = state.phase == Phase.Listening || state.phase == Phase.Finishing
     val ready = state.phase == Phase.Ready
 
@@ -492,7 +647,7 @@ private fun TryCard(state: DictationState) {
                             Text(
                                 "Tap here and use the bubble, or the mic below",
                                 style = style,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                         inner()
@@ -502,23 +657,19 @@ private fun TryCard(state: DictationState) {
             AnimatedVisibility(listening) {
                 Column(Modifier.padding(top = 12.dp)) {
                     Waveform(
-                        state.levels,
+                        { live.value.levels },
                         Modifier.fillMaxWidth().height(28.dp),
                         color = MaterialTheme.colorScheme.primary,
                         bars = 48,
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text(
-                        state.partial.ifBlank { "Listening…" },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    LiveText(live)
                 }
             }
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    stats(state) ?: if (ready || listening) "" else "Start Murmur to dictate",
+                    stats(state) ?: if (ready || listening || state.phase == Phase.Busy) "" else "Start Murmur to dictate",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f),
@@ -534,14 +685,14 @@ private fun TryCard(state: DictationState) {
                 Box(
                     Modifier.size(56.dp).clip(CircleShape).background(bg).clickable(
                         enabled = ready || listening,
-                        onClickLabel = if (listening) "Stop" else "Dictate here",
+                        role = Role.Button,
                     ) {
                         val service = DictationService.instance ?: return@clickable
                         if (listening) service.finish()
                         else service.listen { result ->
                             text = listOf(text.trimEnd(), result).filter { it.isNotEmpty() }.joinToString(" ")
                         }
-                    },
+                    }.semantics { contentDescription = if (listening) "Stop dictation" else "Dictate here" },
                     contentAlignment = Alignment.Center,
                 ) {
                     when {
@@ -556,7 +707,7 @@ private fun TryCard(state: DictationState) {
                         )
                         else -> Icon(
                             painterResource(R.drawable.ic_mic),
-                            contentDescription = "Dictate here",
+                            contentDescription = null,
                             tint = if (ready) MaterialTheme.colorScheme.onPrimary
                             else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -565,6 +716,16 @@ private fun TryCard(state: DictationState) {
             }
         }
     }
+}
+
+/** The live transcript; its own scope, so each new word recomposes just this line. */
+@Composable
+private fun LiveText(live: State<DictationState>) {
+    Text(
+        live.value.partial.ifBlank { "Listening…" },
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 private fun seconds(ms: Long) = String.format(Locale.US, "%.1f s", ms / 1000f)
@@ -581,10 +742,12 @@ private fun VoiceCard(state: DictationState, cpuInstalled: Boolean, tick: Int) {
     val ctx = LocalContext.current
     var useNpu by remember { mutableStateOf(Prefs.useNpu(ctx)) }
     var language by remember { mutableStateOf(Prefs.language(ctx)) }
-    val npuFailed = remember(tick, state.backend) { Prefs.npuFailed(ctx) }
+    var npuFailed by remember(tick, state.backend) { mutableStateOf(Prefs.npuFailed(ctx)) }
     // Switching reloads the model, which can't happen mid-dictation or mid-load.
     val canSwitch = state.phase == Phase.Off || state.phase == Phase.Ready
-    val onNpu = (state.backend ?: Engine.preferredBackend(ctx)) == Backend.Npu
+    // Reads the model folders, so not on every recomposition.
+    val preferred = remember(tick, useNpu, npuFailed) { Engine.preferredBackend(ctx) }
+    val onNpu = (state.backend ?: preferred) == Backend.Npu
 
     Surface(
         shape = RoundedCornerShape(24.dp),
@@ -603,6 +766,8 @@ private fun VoiceCard(state: DictationState, cpuInstalled: Boolean, tick: Int) {
                                 val npu = b == Backend.Npu
                                 if (npu == useNpu && !(npu && npuFailed)) return@SegmentedButton
                                 useNpu = npu
+                                // Choosing again clears the failure (see Prefs.setUseNpu).
+                                npuFailed = false
                                 Prefs.setUseNpu(ctx, npu)
                                 DictationService.instance?.reloadModel()
                             },
@@ -662,13 +827,7 @@ private fun VoiceCard(state: DictationState, cpuInstalled: Boolean, tick: Int) {
 }
 
 @Composable
-private fun SpeedCard(enabled: Boolean) {
-    val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var running by remember { mutableStateOf(false) }
-    var result by remember { mutableStateOf<SpeedResult?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-
+private fun SpeedCard(speed: SpeedTestState, enabled: Boolean) {
     Surface(
         shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surfaceContainer,
@@ -686,23 +845,12 @@ private fun SpeedCard(enabled: Boolean) {
                 }
                 Spacer(Modifier.size(8.dp))
                 FilledTonalButton(
-                    onClick = {
-                        running = true
-                        error = null
-                        scope.launch {
-                            try {
-                                result = withContext(Dispatchers.Default) { SpeedTest.run(ctx) }
-                            } catch (e: Throwable) {
-                                error = e.message
-                            }
-                            running = false
-                        }
-                    },
-                    enabled = enabled && !running,
+                    onClick = { speed.run() },
+                    enabled = enabled && !speed.running,
                     shape = RoundedCornerShape(14.dp),
-                ) { Text(if (running) "Running…" else "Run") }
+                ) { Text(if (speed.running) "Running…" else "Run") }
             }
-            result?.let { r ->
+            speed.result?.let { r ->
                 Spacer(Modifier.height(14.dp))
                 Text(
                     String.format(Locale.US, "%.0f× faster than real time", r.speedup),
@@ -724,7 +872,7 @@ private fun SpeedCard(enabled: Boolean) {
                 Spacer(Modifier.height(8.dp))
                 Text("“${r.text}”", style = MaterialTheme.typography.bodySmall)
             }
-            error?.let {
+            speed.error?.let {
                 Spacer(Modifier.height(8.dp))
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
@@ -738,7 +886,7 @@ private fun AppearanceDialog(current: ThemeMode, onPick: (ThemeMode) -> Unit, on
         onDismissRequest = onDismiss,
         title = { Text("Appearance") },
         text = {
-            Column {
+            Column(Modifier.selectableGroup()) {
                 ThemeMode.entries.forEach { mode ->
                     val selected = mode == current
                     Row(
@@ -748,7 +896,7 @@ private fun AppearanceDialog(current: ThemeMode, onPick: (ThemeMode) -> Unit, on
                             .background(
                                 if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
                             )
-                            .clickable { onPick(mode) }
+                            .selectable(selected, role = Role.RadioButton) { onPick(mode) }
                             .padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -758,7 +906,7 @@ private fun AppearanceDialog(current: ThemeMode, onPick: (ThemeMode) -> Unit, on
                         if (selected) {
                             Icon(
                                 Icons.Rounded.Check,
-                                contentDescription = "Selected",
+                                contentDescription = null,
                                 tint = MaterialTheme.colorScheme.onSecondaryContainer,
                                 modifier = Modifier.size(20.dp),
                             )

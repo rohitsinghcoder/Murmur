@@ -102,6 +102,77 @@ class NumbersTest {
         )
     }
 
+    @Test fun timeCuesNeedClauseEndOrTimeWord() {
+        check("Meet me at five thirty tomorrow.", "Meet me at 5:30 tomorrow.")
+        check("at ten fifteen I'll call", "at 10:15 I'll call")
+        check("We left around two thirty, then ate.", "We left around 2:30, then ate.")
+        check("from nine thirty on Monday", "from 9:30 on Monday")
+        kept(
+            "There were about two thirty people.", "It's about five fifty miles away.",
+            "After two twenty runs it broke.", "I was there from two twenty days ago.",
+        )
+    }
+
+    @Test fun cents() {
+        check("It costs twenty five dollars and fifty cents.", "It costs $25.50.")
+        check("twenty five dollars fifty", "$25.50")
+        check("It was twenty five dollars fifty.", "It was $25.50.")
+        check("one dollar and five cents", "$1.05")
+        check("twenty dollars and twenty five cents", "$20.25")
+        check("ten euros fifty", "€10.50")
+        // Not cents: no "cents" after "and", or more words follow.
+        check("five dollars and ten minutes", "$5 and 10 minutes")
+        check("ten dollars fifty times", "$10 50 times")
+        check("two million dollars fifty", "$2 million 50")
+    }
+
+    @Test fun decimalMillions() {
+        check("one point five million dollars", "$1.5 million")
+        check("two point five billion people", "2.5 billion people")
+        check("seven point two five million", "7.25 million")
+    }
+
+    @Test fun negativeNumbers() {
+        check("minus twenty degrees", "-20 degrees")
+        check("It's negative fifteen percent.", "It's -15%.")
+        check("Minus twenty outside.", "-20 outside.")
+        check("minus two point five", "-2.5")
+        // Sums and small numbers keep the word.
+        check("fifty minus twenty", "50 minus 20")
+        check("100 minus twenty", "100 minus 20")
+        check("x minus twenty", "x minus 20")
+        check("minus twenty dollars", "minus $20")
+        kept("minus five")
+    }
+
+    @Test fun hyphenatedCompoundsAreNotYearsOrOrdinals() {
+        kept("I have twenty twenty-dollar bills.", "twenty first-time buyers", "nineteen twenty-somethings")
+        check("Twenty-first century.", "21st century.")
+        check("twenty fifty-five", "2055")
+    }
+
+    @Test fun strayPointStaysWords() {
+        kept("point five percent", "The point twenty people made.")
+        check("zero point five percent", "0.5%")
+    }
+
+    @Test fun countingStaysWords() {
+        kept("one two three go", "I counted to one two three.", "one two three four")
+        check("one two three five", "1235")
+        check("one oh one", "101")
+    }
+
+    @Test fun liveLeavesTrailingRunAsWords() {
+        fun live(input: String, expected: String) =
+            assertEquals("format(\"$input\", live)", expected, Numbers.format(input, live = true))
+        live("twenty", "twenty")
+        live("twenty five people and thirty", "25 people and thirty")
+        live("It's at three point", "It's at three point")
+        live("twenty five ", "twenty five ")
+        live("twenty five.", "25.")
+        live("Fifty percent", "50%")
+    }
+
     @Test fun spelledDigits() {
         check("Call me at nine eight seven six five four three two one zero.", "Call me at 9876543210.")
         check("nine one one", "911")

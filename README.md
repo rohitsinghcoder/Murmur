@@ -23,7 +23,7 @@ parameters, int8) through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx).
   recommended, since the model stays loaded while Murmur is on.
 - A computer with **JDK 17**, the **Android SDK** (installing
   [Android Studio](https://developer.android.com/studio) is the easiest way to get both) and
-  **adb**. `curl`, `tar` and `bash` for the setup scripts (macOS, Linux, or WSL/Git Bash on
+  **adb**. `curl`, `tar` and `bash` for the setup scripts (plus `zip` and `unzip` for `--npu`) (macOS, Linux, or WSL/Git Bash on
   Windows).
 - USB debugging enabled on the phone (Settings → About phone → tap *Build number* 7 times,
   then Settings → Developer options → *USB debugging*).
@@ -120,6 +120,8 @@ Everything is in `app/src/main/java/com/murmur/app/`:
 | `BubbleService.kt` | Accessibility service: shows the bubble and types text into the focused field |
 | `Bubble.kt` | The bubble and the listening pill |
 | `Cleanup.kt`, `Numbers.kt` | Filler-word removal and number formatting |
+| `Insertion.kt` | Fits the text to the cursor: spacing, mid-sentence capitals, trailing period |
+| `SpeedTest.kt` | Times the model on a sample recording (in-app speed test) |
 | `MainActivity.kt`, `HistoryScreen.kt` | Setup checklist, try-it box, speed test, history |
 | `History.kt` | Dictation history, stored privately on the phone |
 | `State.kt`, `Theme.kt` | Shared state, theme and preferences |

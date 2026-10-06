@@ -123,3 +123,7 @@ Everything is in `app/src/main/java/com/murmur/app/`:
 | `MainActivity.kt`, `HistoryScreen.kt` | Setup checklist, try-it box, speed test, history |
 | `History.kt` | Dictation history, stored privately on the phone |
 | `State.kt`, `Theme.kt` | Shared state, theme and preferences |
+
+## License
+
+MIT. See [LICENSE](LICENSE). The Nemotron model and sherpa-onnx have their own licenses.
